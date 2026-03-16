@@ -345,7 +345,7 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
 
   private sanitiseDisplayName(name: string): string {
     return name
-      .replace(/[[\]():]/g, '') // Remove brackets, parens, colons
+      .replace(/[[\]():/]/g, '') // Remove brackets, parens, colons, slashes
       .replace(/\s{2,}/g, ' ')  // Collapse multiple spaces
       .trim();
   }
