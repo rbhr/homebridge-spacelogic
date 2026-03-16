@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+
 import type {
   API,
   Characteristic,
@@ -126,6 +128,7 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
     let count = 0;
     const seenAddresses = new Set<string>();
     const newAccessories: PlatformAccessory[] = [];
+    const newOverrides: GroupOverride[] = [];
 
     this.log.info(`Discovery: ${devices.length} devices, ${this.accessories.size} cached, maxAccessories=${maxAccessories || 'unlimited'}`);
 
@@ -144,14 +147,26 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
 
       const override = overrides.get(device.addressString);
 
+      // Devices without a group override — create a disabled override in config
+      if (!override) {
+        this.log.info(`New device discovered: ${device.addressString} (${device.name}) — adding as disabled override`);
+        newOverrides.push({
+          address: device.addressString,
+          type: device.address.application === CBUS_MEASUREMENT_APPLICATION ? 'temperatureSensor' : 'dimmer',
+          name: device.name,
+          enabled: false,
+        });
+        continue;
+      }
+
       // Skip explicitly disabled devices
-      if (override?.enabled === false) {
+      if (override.enabled === false) {
         this.log.debug(`Skipping disabled device: ${device.addressString} (${device.name})`);
         continue;
       }
 
       const deviceType = this.resolveDeviceType(device, overrides);
-      const displayName = this.sanitiseDisplayName(override?.name || device.name);
+      const displayName = this.sanitiseDisplayName(override.name || device.name);
 
       this.registerDevice(cgateConfig, device, deviceType, displayName, override, newAccessories);
       count++;
@@ -160,6 +175,11 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
 
     // Register temperature sensor overrides (channel-based, not auto-discovered)
     this.registerTemperatureSensors(cgateConfig, overrides, newAccessories, maxAccessories, count);
+
+    // Persist any newly discovered devices as disabled overrides in config.json
+    if (newOverrides.length > 0) {
+      this.appendOverridesToConfig(newOverrides);
+    }
 
     // Batch-register all new accessories at once
     if (newAccessories.length > 0) {
@@ -354,6 +374,36 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
       }
     }
     return map;
+  }
+
+  private appendOverridesToConfig(newOverrides: GroupOverride[]): void {
+    try {
+      const configPath = this.api.user.configPath();
+      const raw = readFileSync(configPath, 'utf-8');
+      const fullConfig = JSON.parse(raw);
+
+      // Find our platform entry
+      const platforms = fullConfig.platforms as Record<string, unknown>[] | undefined;
+      const ourPlatform = platforms?.find(
+        (p) => p.platform === PLATFORM_NAME,
+      );
+
+      if (!ourPlatform) {
+        this.log.warn('Could not find platform entry in config.json — new overrides not saved');
+        return;
+      }
+
+      if (!Array.isArray(ourPlatform.groupOverrides)) {
+        ourPlatform.groupOverrides = [];
+      }
+
+      (ourPlatform.groupOverrides as GroupOverride[]).push(...newOverrides);
+
+      writeFileSync(configPath, JSON.stringify(fullConfig, null, 4), 'utf-8');
+      this.log.info(`Added ${newOverrides.length} new disabled override(s) to config.json`);
+    } catch (err) {
+      this.log.error(`Failed to update config.json with new overrides: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   private sanitiseDisplayName(name: string): string {
