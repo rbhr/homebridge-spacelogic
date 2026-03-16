@@ -6,210 +6,350 @@
 
 <span align="center">
 
-# Homebridge Platform Plugin Template
+# homebridge-spacelogic
 
 </span>
 
-> [!IMPORTANT]
-> **Homebridge v2.0 Information**
->
-> This template currently has a
-> - `package.json -> engines.homebridge` value of `"^1.8.0 || ^2.0.0-beta.0"`
-> - `package.json -> devDependencies.homebridge` value of `"^2.0.0-beta.0"`
->
-> This is to ensure that your plugin will build and run on both Homebridge v1 and v2.
->
-> Once Homebridge v2.0 has been released, you can remove the `-beta.0` in both places.
+[![npm](https://img.shields.io/npm/v/homebridge-spacelogic.svg)](https://www.npmjs.com/package/homebridge-spacelogic)
+[![npm](https://img.shields.io/npm/dt/homebridge-spacelogic.svg)](https://www.npmjs.com/package/homebridge-spacelogic)
+[![License](https://img.shields.io/github/license/rbhr/homebridge-spacelogic)](https://github.com/rbhr/homebridge-spacelogic/blob/latest/LICENSE)
 
----
+A [Homebridge](https://homebridge.io) dynamic platform plugin for **Clipsal/Schneider Electric C-Bus** lighting and sensor networks, connecting to Apple HomeKit via a [C-Gate](https://www.clipsal.com/products/detail?CatNo=5500CGE) server.
 
-This is a template Homebridge dynamic platform plugin and can be used as a base to help you get started developing your own plugin.
+## Features
 
-This template should be used in conjunction with the [developer documentation](https://developers.homebridge.io/). A full list of all supported service types, and their characteristics is available on this site.
+- **Automatic discovery** of C-Bus groups via C-Gate DBGETXML
+- **Real-time status updates** via C-Gate SCP (Status Change Port) — instant feedback when lights are controlled from physical switches
+- **8 accessory types** — dimmer, relay, switch, fan, cover/shutter, motion sensor, contact sensor, temperature sensor
+- **Group overrides** — customise device type, name, and options per C-Bus group
+- **Temperature sensors** — supports C-Bus Measurement Application (app 228) with multi-channel devices
+- **HTTP Commander** — optional built-in web console for direct C-Gate command access with real-time event streaming
+- **Config UI support** — full settings UI via [homebridge-config-ui-x](https://github.com/homebridge/homebridge-config-ui-x)
+- **Homebridge 2.0** compatible (also works with Homebridge v1.8+)
+- **Zero external runtime dependencies** beyond `fast-xml-parser` for C-Gate XML parsing
 
-### Clone As Template
+## Requirements
 
-Click the link below to create a new GitHub Repository using this template, or click the *Use This Template* button above.
+- [Homebridge](https://homebridge.io) v1.8.0 or later (including v2.0 beta)
+- Node.js 20, 22, or 24
+- A running [C-Gate](https://www.clipsal.com/products/detail?CatNo=5500CGE) server (v2.x or v3.x) accessible on the network
+- A configured C-Bus network with a C-Gate project
 
-<span align="center">
+## Installation
 
-### [Create New Repository From Template](https://github.com/homebridge/homebridge-plugin-template/generate)
+### Via Homebridge Config UI (Recommended)
 
-</span>
+Search for **homebridge-spacelogic** in the Homebridge Config UI plugin search.
 
-### Setup Development Environment
-
-To develop Homebridge plugins you must have Node.js 20 or later installed, and a modern code editor such as [VS Code](https://code.visualstudio.com/). This plugin template uses [TypeScript](https://www.typescriptlang.org/) to make development easier and comes with pre-configured settings for [VS Code](https://code.visualstudio.com/) and ESLint. If you are using VS Code install these extensions:
-
-- [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint)
-
-### Install Development Dependencies
-
-Using a terminal, navigate to the project folder and run this command to install the development dependencies:
+### Via npm
 
 ```shell
+sudo npm install -g homebridge-spacelogic
+```
+
+### From GitHub (Development)
+
+```shell
+git clone https://github.com/rbhr/homebridge-spacelogic.git
+cd homebridge-spacelogic
 npm install
-```
-
-### Update package.json
-
-Open the [`package.json`](./package.json) and change the following attributes:
-
-- `name` - this should be prefixed with `homebridge-` or `@username/homebridge-`, is case-sensitive, and contains no spaces nor special characters apart from a dash `-`
-- `displayName` - this is the "nice" name displayed in the Homebridge UI
-- `homepage` - link to your GitHub repo's `README.md`
-- `repository.url` - link to your GitHub repo
-- `bugs.url` - link to your GitHub repo issues page
-
-When you are ready to publish the plugin you should set `private` to false, or remove the attribute entirely.
-
-### Update Plugin Defaults
-
-Open the [`src/settings.ts`](./src/settings.ts) file and change the default values:
-
-- `PLATFORM_NAME` - Set this to be the name of your platform. This is the name of the platform that users will use to register the plugin in the Homebridge `config.json`.
-- `PLUGIN_NAME` - Set this to be the same name you set in the [`package.json`](./package.json) file.
-
-Open the [`config.schema.json`](./config.schema.json) file and change the following attribute:
-
-- `pluginAlias` - set this to match the `PLATFORM_NAME` you defined in the previous step.
-
-See the [Homebridge API docs](https://developers.homebridge.io/#/config-schema#default-values) for more details on the other attributes you can set in the `config.schema.json` file.
-
-### Build Plugin
-
-TypeScript needs to be compiled into JavaScript before it can run. The following command will compile the contents of your [`src`](./src) directory and put the resulting code into the `dist` folder.
-
-```shell
 npm run build
+sudo npm link
 ```
 
-### Link To Homebridge
+## Configuration
 
-Run this command so your global installation of Homebridge can discover the plugin in your development environment:
+### Minimal Config
 
-```shell
-npm link
-```
+Add the following to your Homebridge `config.json` under `platforms`:
 
-You can now start Homebridge, use the `-D` flag, so you can see debug log messages in your plugin:
-
-```shell
-homebridge -D
-```
-
-### Watch For Changes and Build Automatically
-
-If you want to have your code compile automatically as you make changes, and restart Homebridge automatically between changes, you first need to add your plugin as a platform in `./test/hbConfig/config.json`:
-```
+```json
 {
-...
-    "platforms": [
+    "name": "SpaceLogic C-Bus",
+    "platform": "SpaceLogicPlatform",
+    "cgate": {
+        "host": "192.168.1.100",
+        "project": "HOME",
+        "network": 254
+    }
+}
+```
+
+This will connect to C-Gate, discover all groups in the lighting application (app 56), and expose them as dimmable lights in HomeKit.
+
+### Full Config
+
+```json
+{
+    "name": "SpaceLogic C-Bus",
+    "platform": "SpaceLogicPlatform",
+    "cgate": {
+        "host": "192.168.1.100",
+        "commandPort": 20023,
+        "eventPort": 20024,
+        "scpPort": 20025,
+        "project": "HOME",
+        "network": 254
+    },
+    "commander": {
+        "port": 8980
+    },
+    "maxAccessories": 0,
+    "groupOverrides": [
         {
-            "name": "Config",
-            "port": 8581,
-            "platform": "config"
+            "address": "254/56/1",
+            "type": "dimmer",
+            "name": "Living Room Downlights",
+            "enabled": true,
+            "options": {
+                "rampRate": 4
+            }
         },
         {
-            "name": "<PLUGIN_NAME>",
-            //... any other options, as listed in config.schema.json ...
-            "platform": "<PLATFORM_NAME>"
+            "address": "254/56/20",
+            "type": "relay",
+            "name": "Garage Light"
+        },
+        {
+            "address": "254/56/50",
+            "type": "switch",
+            "name": "Garden Irrigation",
+            "options": {
+                "autoOff": 3600
+            }
+        },
+        {
+            "address": "254/56/60",
+            "type": "fan",
+            "name": "Bedroom Fan"
+        },
+        {
+            "address": "254/56/70",
+            "type": "cover",
+            "name": "Lounge Blinds",
+            "options": {
+                "travelTime": 30
+            }
+        },
+        {
+            "address": "254/56/80",
+            "type": "motionSensor",
+            "name": "Front Door Motion"
+        },
+        {
+            "address": "254/56/90",
+            "type": "contactSensor",
+            "name": "Garage Door"
+        },
+        {
+            "address": "254/228/1",
+            "type": "temperatureSensor",
+            "name": "Living Room Temperature",
+            "channel": 1
+        },
+        {
+            "address": "254/56/100",
+            "enabled": false
         }
     ]
 }
 ```
 
-and then you can run:
+### Config Reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | `"SpaceLogic C-Bus"` | Platform display name |
+| `cgate.host` | string | `"localhost"` | C-Gate server hostname or IP |
+| `cgate.commandPort` | integer | `20023` | C-Gate command port |
+| `cgate.eventPort` | integer | `20024` | C-Gate event port |
+| `cgate.scpPort` | integer | `20025` | C-Gate status change port |
+| `cgate.project` | string | *(required)* | C-Gate project name |
+| `cgate.network` | integer | `254` | Default C-Bus network number |
+| `commander.port` | integer | `0` | HTTP Commander port (0 = disabled) |
+| `maxAccessories` | integer | `0` | Limit registered accessories (0 = unlimited) |
+
+### Group Override Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `address` | string | *(required)* | C-Bus address: `network/application/group` (e.g., `254/56/3`) |
+| `type` | string | `"dimmer"` | Accessory type (see below) |
+| `name` | string | *(auto-discovered)* | Custom display name for HomeKit |
+| `enabled` | boolean | `true` | Set `false` to hide from HomeKit |
+| `channel` | integer | — | Measurement channel for temperature sensors (app 228) |
+| `options` | object | — | Type-specific options (see below) |
+
+## Accessory Types
+
+| Type | HomeKit Service | C-Bus Control | Description |
+|------|----------------|---------------|-------------|
+| `dimmer` | Lightbulb (On + Brightness) | RAMP | Dimmable light — the default for all discovered groups |
+| `relay` | Lightbulb (On only) | ON/OFF | Non-dimmable light or relay |
+| `switch` | Switch (On) | ON/OFF | Generic switch with optional auto-off timer |
+| `fan` | Fan v2 (Active + Speed) | RAMP | Variable speed fan |
+| `cover` | Window Covering (Position) | RAMP | Motorised blind, shutter, or curtain |
+| `motionSensor` | Motion Sensor | read-only | C-Bus motion/occupancy sensor |
+| `contactSensor` | Contact Sensor | read-only | C-Bus contact/reed sensor |
+| `temperatureSensor` | Temperature Sensor | read-only | C-Bus Measurement App (228) temperature reading |
+
+### Type-Specific Options
+
+**Dimmer:**
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `rampRate` | number | `0` | Default ramp duration in seconds |
+
+**Switch:**
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `autoOff` | number | `0` | Auto-off timer in seconds (0 = disabled) |
+
+**Cover:**
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `travelTime` | number | `30` | Time in seconds for full open/close travel |
+
+## Temperature Sensors
+
+C-Bus temperature sensors use the Measurement Application (app 228) with device/channel addressing, rather than the group addressing used by lighting.
+
+To configure a temperature sensor, you need:
+- The **device address** in the measurement application (e.g., `254/228/1`)
+- The **channel number** for the specific temperature reading
+
+```json
+{
+    "address": "254/228/22",
+    "type": "temperatureSensor",
+    "name": "Kitchen Temperature",
+    "channel": 1
+}
+```
+
+A single C-Bus measurement device can have multiple channels (e.g., indoor temp on channel 1, outdoor temp on channel 5). Create separate overrides for each channel you want to expose.
+
+## HTTP Commander
+
+The optional HTTP Commander provides a web-based console for direct C-Gate command access and real-time event monitoring. Enable it by setting `commander.port` to a non-zero value (e.g., `8980`).
+
+### Web Console
+
+Open `http://<homebridge-ip>:<port>/` in your browser for a terminal-style console where you can:
+
+- Type and send any C-Gate command
+- See real-time SCP events (lighting changes, measurement data) as they happen
+- Monitor event port activity
+- Debug C-Bus communication
+
+### HTTP API
+
+**Send a command:**
+```
+GET /cgate?cmd=<command>
+```
+
+Example:
+```shell
+curl "http://localhost:8980/cgate?cmd=ON%20//HOME/254/56/1"
+```
+
+Response:
+```json
+{
+    "status": "ok",
+    "command": "ON //HOME/254/56/1",
+    "response": "200 OK"
+}
+```
+
+**Event stream (SSE):**
+```
+GET /events
+```
+
+Returns a Server-Sent Events stream with real-time C-Gate events. Event types: `event` (event port), `scp` (status change port).
 
 ```shell
+curl -N http://localhost:8980/events
+```
+
+## C-Gate Setup Notes
+
+- C-Gate must be accessible from the machine running Homebridge on ports 20023, 20024, and 20025 (or your custom ports)
+- The C-Gate project must be configured and started
+- If C-Gate is on a different machine, ensure its `access-control` settings allow connections from your Homebridge host
+- C-Gate access control is configured in `C-Gate/config/access-control.txt` — add your Homebridge server's IP if needed
+
+## How It Works
+
+1. **Discovery:** On startup, the plugin sends a `DBGETXML` command to C-Gate to retrieve the full project database, then parses the XML to find all groups in the lighting application (app 56)
+2. **Registration:** Each discovered group is registered as a HomeKit accessory. Group overrides let you change the device type, rename, or disable individual groups
+3. **Control:** When you control an accessory in HomeKit, the plugin sends the corresponding C-Gate command (ON, OFF, RAMP) via the command port (20023)
+4. **Real-time updates:** The plugin listens on the SCP port (20025) for state change notifications. When a light is turned on from a physical switch or another controller, HomeKit updates instantly
+
+## Development
+
+```shell
+# Clone the repo
+git clone https://github.com/rbhr/homebridge-spacelogic.git
+cd homebridge-spacelogic
+
+# Install dependencies
+npm install
+
+# Build
+npm run build
+
+# Link for development
+npm link
+
+# Watch mode (auto-rebuild + restart)
 npm run watch
 ```
 
-This will launch an instance of Homebridge in debug mode which will restart every time you make a change to the source code. It will load the config stored in the default location under `~/.homebridge`. You may need to stop other running instances of Homebridge while using this command to prevent conflicts. You can adjust the Homebridge startup command in the [`nodemon.json`](./nodemon.json) file.
+Configure your development instance in `test/hbConfig/config.json`.
 
-### Customise Plugin
+### Versioning
 
-You can now start customising the plugin template to suit your requirements.
-
-- [`src/platform.ts`](./src/platform.ts) - this is where your device setup and discovery should go.
-- [`src/platformAccessory.ts`](./src/platformAccessory.ts) - this is where your accessory control logic should go, you can rename or create multiple instances of this file for each accessory type you need to implement as part of your platform plugin. You can refer to the [developer documentation](https://developers.homebridge.io/) to see what characteristics you need to implement for each service type.
-- [`config.schema.json`](./config.schema.json) - update the config schema to match the config you expect from the user. See the [Plugin Config Schema Documentation](https://developers.homebridge.io/#/config-schema).
-
-### Versioning Your Plugin
-
-Given a version number `MAJOR`.`MINOR`.`PATCH`, such as `1.4.3`, increment the:
-
-1. **MAJOR** version when you make breaking changes to your plugin,
-2. **MINOR** version when you add functionality in a backwards compatible manner, and
-3. **PATCH** version when you make backwards compatible bug fixes.
-
-You can use the `npm version` command to help you with this:
+Given a version number `MAJOR`.`MINOR`.`PATCH`:
 
 ```shell
-# major update / breaking changes
+# Major (breaking changes)
 npm version major
 
-# minor update / new features
-npm version update
+# Minor (new features, backwards compatible)
+npm version minor
 
-# patch / bugfixes
+# Patch (bug fixes)
 npm version patch
 ```
 
-### Publish Package
-
-When you are ready to publish your plugin to [npm](https://www.npmjs.com/), make sure you have removed the `private` attribute from the [`package.json`](./package.json) file then run:
+### Publishing
 
 ```shell
 npm publish
 ```
 
-If you are publishing a scoped plugin, i.e. `@username/homebridge-xxx` you will need to add `--access=public` to command the first time you publish.
-
-#### Publishing Beta Versions
-
-You can publish *beta* versions of your plugin for other users to test before you release it to everyone.
+To publish a beta:
 
 ```shell
-# create a new pre-release version (eg. 2.1.0-beta.1)
 npm version prepatch --preid beta
-
-# publish to @beta
 npm publish --tag beta
 ```
 
-Users can then install the  *beta* version by appending `@beta` to the install command, for example:
+Users install betas with:
 
 ```shell
-sudo npm install -g homebridge-example-plugin@beta
+sudo npm install -g homebridge-spacelogic@beta
 ```
 
-### Best Practices
+## License
 
-Consider creating your plugin with the [Homebridge Verified](https://github.com/homebridge/verified) criteria in mind. This will help you to create a plugin that is easy to use and works well with Homebridge.
-You can then submit your plugin to the Homebridge Verified list for review.
-The most up-to-date criteria can be found [here](https://github.com/homebridge/verified#requirements).
-For reference, the current criteria are:
+[Apache 2.0](LICENSE)
 
-- **General**
-  - The plugin must be of type [dynamic platform](https://developers.homebridge.io/#/#dynamic-platform-template).
-  - The plugin must not offer the same nor less functionality than that of any existing **verified** plugin.
-- **Repo**
-  - The plugin must be published to NPM and the source code available on a GitHub repository, with issues enabled.
-  - A GitHub release should be created for every new version of your plugin, with release notes.
-- **Environment**
-  - The plugin must run on all [supported LTS versions of Node.js](https://github.com/homebridge/homebridge/wiki/How-To-Update-Node.js), at the time of writing this is Node v18, v20 and v22.
-  - The plugin must successfully install and not start unless it is configured.
-  - The plugin must not execute post-install scripts that modify the users' system in any way.
-  - The plugin must not require the user to run Homebridge in a TTY or with non-standard startup parameters, even for initial configuration.
-- **Codebase**
-  - The plugin must implement the [Homebridge Plugin Settings GUI](https://developers.homebridge.io/#/config-schema).
-  - The plugin must not contain any analytics or calls that enable you to track the user.
-  - If the plugin needs to write files to disk (cache, keys, etc.), it must store them inside the Homebridge storage directory.
-  - The plugin must not throw unhandled exceptions, the plugin must catch and log its own errors.
+## Acknowledgements
 
-### Useful Links
-
-Note these links are here for help but are not supported/verified by the Homebridge team
-
-- [Custom Characteristics](https://github.com/homebridge/homebridge-plugin-template/issues/20)
+- [Homebridge](https://homebridge.io) and the [Homebridge Plugin Template](https://github.com/homebridge/homebridge-plugin-template)
+- [C-Gate](https://www.clipsal.com/products/detail?CatNo=5500CGE) by Clipsal/Schneider Electric
+- [ha-spacelogic](https://github.com/rbhr/ha-spacelogic) Home Assistant custom component (reference implementation)
