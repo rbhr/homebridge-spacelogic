@@ -1,18 +1,165 @@
 {
-  "pluginAlias": "ExampleHomebridgePlugin",
+  "pluginAlias": "SpaceLogicPlatform",
   "pluginType": "platform",
   "singular": true,
   "strictValidation": false,
+  "headerDisplay": "Connect your Clipsal/Schneider Electric C-Bus lighting network to Apple HomeKit via C-Gate.",
   "schema": {
     "type": "object",
-    "required": ["name"],
-    "additionalProperties": false,
+    "required": ["name", "cgate"],
     "properties": {
       "name": {
-        "title": "Name",
+        "title": "Platform Name",
         "type": "string",
-        "default": "Example Dynamic Platform"
+        "default": "SpaceLogic C-Bus"
+      },
+      "cgate": {
+        "title": "C-Gate Connection",
+        "type": "object",
+        "required": ["host", "project"],
+        "properties": {
+          "host": {
+            "title": "C-Gate Host",
+            "type": "string",
+            "default": "localhost",
+            "description": "Hostname or IP address of the C-Gate server."
+          },
+          "commandPort": {
+            "title": "Command Port",
+            "type": "integer",
+            "default": 20023,
+            "description": "C-Gate command port."
+          },
+          "eventPort": {
+            "title": "Event Port",
+            "type": "integer",
+            "default": 20024,
+            "description": "C-Gate event port."
+          },
+          "scpPort": {
+            "title": "Status Change Port",
+            "type": "integer",
+            "default": 20025,
+            "description": "C-Gate status change port (SCP)."
+          },
+          "project": {
+            "title": "C-Gate Project Name",
+            "type": "string",
+            "description": "The C-Gate project name (e.g., 'HOME')."
+          },
+          "network": {
+            "title": "Default Network",
+            "type": "integer",
+            "default": 254,
+            "description": "Default C-Bus network number."
+          }
+        }
+      },
+      "maxAccessories": {
+        "title": "Max Accessories",
+        "type": "integer",
+        "default": 0,
+        "minimum": 0,
+        "description": "Limit the number of accessories registered (0 = unlimited). Useful for debugging."
+      },
+      "groupOverrides": {
+        "title": "Group Type Overrides",
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "title": "Group Address",
+              "type": "string",
+              "description": "C-Bus address: network/application/group (e.g., '254/56/3').",
+              "pattern": "^\\d+/\\d+/\\d+$"
+            },
+            "type": {
+              "title": "Device Type",
+              "type": "string",
+              "oneOf": [
+                { "title": "Dimmer Light", "enum": ["dimmer"] },
+                { "title": "Relay Light (On/Off)", "enum": ["relay"] },
+                { "title": "Switch", "enum": ["switch"] },
+                { "title": "Fan", "enum": ["fan"] },
+                { "title": "Cover/Shutter", "enum": ["cover"] },
+                { "title": "Motion Sensor", "enum": ["motionSensor"] },
+                { "title": "Contact Sensor", "enum": ["contactSensor"] },
+                { "title": "Temperature Sensor", "enum": ["temperatureSensor"] }
+              ]
+            },
+            "name": {
+              "title": "Custom Name",
+              "type": "string",
+              "description": "Override the discovered name."
+            },
+            "enabled": {
+              "title": "Enabled",
+              "type": "boolean",
+              "default": true,
+              "description": "Set to false to hide this group from HomeKit."
+            },
+            "channel": {
+              "title": "Measurement Channel",
+              "type": "integer",
+              "description": "Channel number for temperature sensors (app 228)."
+            },
+            "options": {
+              "title": "Type-Specific Options",
+              "type": "object",
+              "properties": {
+                "travelTime": {
+                  "title": "Cover Travel Time (seconds)",
+                  "type": "number",
+                  "default": 30,
+                  "description": "Time for cover to fully open/close."
+                },
+                "autoOff": {
+                  "title": "Switch Auto-Off (seconds)",
+                  "type": "number",
+                  "description": "Automatically turn off switch after N seconds (0 = disabled)."
+                },
+                "rampRate": {
+                  "title": "Dimmer Ramp Rate (seconds)",
+                  "type": "number",
+                  "default": 0,
+                  "description": "Default ramp duration for dimmer changes."
+                }
+              }
+            }
+          }
+        }
       }
     }
-  }
+  },
+  "layout": [
+    { "key": "name" },
+    {
+      "type": "fieldset",
+      "title": "C-Gate Connection",
+      "items": [
+        "cgate.host",
+        "cgate.project",
+        "cgate.network",
+        { "key": "cgate.commandPort", "type": "number" },
+        { "key": "cgate.eventPort", "type": "number" },
+        { "key": "cgate.scpPort", "type": "number" }
+      ]
+    },
+    {
+      "key": "groupOverrides",
+      "type": "array",
+      "title": "Group Type Overrides",
+      "description": "Override the default device type for specific C-Bus groups.",
+      "buttonText": "Add Override",
+      "items": [
+        "groupOverrides[].address",
+        "groupOverrides[].type",
+        "groupOverrides[].name",
+        "groupOverrides[].options.travelTime",
+        "groupOverrides[].options.autoOff",
+        "groupOverrides[].options.rampRate"
+      ]
+    }
+  ]
 }
