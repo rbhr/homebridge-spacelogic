@@ -22,6 +22,7 @@ import type {
 import { CBUS_MEASUREMENT_APPLICATION } from './cgate/types.js';
 import type { BaseAccessory } from './accessories/BaseAccessory.js';
 import { createAccessory } from './accessories/AccessoryFactory.js';
+import { HttpCommander } from './commander/HttpCommander.js';
 
 export class SpaceLogicPlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service;
@@ -30,6 +31,7 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
   public readonly accessories: Map<string, PlatformAccessory> = new Map();
   private readonly accessoryHandlers: Map<string, BaseAccessory> = new Map();
   private readonly discoveredUUIDs: string[] = [];
+  private httpCommander: HttpCommander | null = null;
 
   public cgateClient!: CGateClient;
 
@@ -76,6 +78,13 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
       return;
     }
 
+    // Start HTTP Commander if configured
+    const commanderPort = (this.config.commander?.port as number | undefined) ?? 0;
+    if (commanderPort > 0) {
+      this.httpCommander = new HttpCommander(commanderPort, this.cgateClient, this.log);
+      this.httpCommander.start();
+    }
+
     try {
       await this.discoverDevices(cgateConfig);
     } catch (err) {
@@ -85,6 +94,10 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
 
   private shutdown(): void {
     this.log.info('Shutting down SpaceLogic platform');
+    if (this.httpCommander) {
+      this.httpCommander.stop();
+      this.httpCommander = null;
+    }
     if (this.cgateClient) {
       this.cgateClient.disconnect();
     }

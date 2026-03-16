@@ -3,7 +3,7 @@
   "displayName": "SpaceLogic C-Bus",
   "type": "module",
   "version": "1.0.0",
-  "private": true,
+
   "description": "Homebridge plugin for Clipsal/Schneider Electric C-Bus lighting via C-Gate server.",
   "author": "rbhr",
   "license": "Apache-2.0",

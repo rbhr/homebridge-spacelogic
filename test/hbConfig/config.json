@@ -35,6 +35,9 @@
                 "project": "YELMAH",
                 "network": 254
             },
+            "commander": {
+                "port": 8980
+            },
             "maxAccessories": 0,
             "groupOverrides": [
                 { "address": "254/56/1",   "type": "dimmer", "name": "Ensuite Vanity Lights" },

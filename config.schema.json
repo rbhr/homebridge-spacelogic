@@ -62,6 +62,20 @@
         "minimum": 0,
         "description": "Limit the number of accessories registered (0 = unlimited). Useful for debugging."
       },
+      "commander": {
+        "title": "HTTP Commander",
+        "type": "object",
+        "properties": {
+          "port": {
+            "title": "Commander Port",
+            "type": "integer",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "HTTP port for C-Gate command console (0 = disabled)."
+          }
+        }
+      },
       "groupOverrides": {
         "title": "Group Type Overrides",
         "type": "array",
@@ -144,6 +158,14 @@
         { "key": "cgate.commandPort", "type": "number" },
         { "key": "cgate.eventPort", "type": "number" },
         { "key": "cgate.scpPort", "type": "number" }
+      ]
+    },
+    {
+      "type": "fieldset",
+      "title": "HTTP Commander",
+      "description": "Optional web console for direct C-Gate command access.",
+      "items": [
+        { "key": "commander.port", "type": "number" }
       ]
     },
     {

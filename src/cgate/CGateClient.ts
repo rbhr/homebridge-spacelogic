@@ -295,9 +295,11 @@ export class CGateClient extends EventEmitter {
 
   private handleEventLine(line: string): void {
     this.log.debug(`Event: ${line}`);
+    this.emit('eventLine', line);
   }
 
   private handleScpLine(line: string): void {
+    this.emit('scpLine', line);
     const event = this.parseScpLine(line);
     if (event) {
       this.emit('scpEvent', event);
