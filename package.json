@@ -9,7 +9,7 @@
   "homepage": "https://github.com/rbhr/homebridge-spacelogic#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rbhr/homebridge-spacelogic.git"
+    "url": "git+https://github.com/rbhr/homebridge-spacelogic.git"
   },
   "bugs": {
     "url": "https://github.com/rbhr/homebridge-spacelogic/issues"
