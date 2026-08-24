@@ -95,6 +95,7 @@ This will connect to C-Gate, discover all groups in the lighting application (ap
         "port": 8980
     },
     "maxAccessories": 0,
+    "allowBulkRemoval": false,
     "groupOverrides": [
         {
             "address": "254/56/1",
@@ -168,6 +169,7 @@ This will connect to C-Gate, discover all groups in the lighting application (ap
 | `cgate.network` | integer | `254` | Default C-Bus network number |
 | `commander.port` | integer | `0` | HTTP Commander port (0 = disabled) |
 | `maxAccessories` | integer | `0` | Limit registered accessories (0 = unlimited) |
+| `allowBulkRemoval` | boolean | `false` | Allow one discovery pass to remove more than 20% of your accessories (see [Accessory Removal Safety](#accessory-removal-safety)) |
 
 ### Group Override Fields
 
@@ -287,6 +289,52 @@ curl -N http://localhost:8980/events
 2. **Registration:** Each discovered group is registered as a HomeKit accessory. Group overrides let you change the device type, rename, or disable individual groups
 3. **Control:** When you control an accessory in HomeKit, the plugin sends the corresponding C-Gate command (ON, OFF, RAMP) via the command port (20023)
 4. **Real-time updates:** The plugin listens on the SCP port (20025) for state change notifications. When a light is turned on from a physical switch or another controller, HomeKit updates instantly
+
+## Accessory Removal Safety
+
+Unregistering a HomeKit accessory is destructive and irreversible. HomeKit binds room
+assignments, custom names, scenes and automations to the accessory instance in the
+bridge — not to the plugin's UUID. Once an accessory is removed, re-registering it
+later with the same UUID comes back as a brand-new accessory with none of that
+metadata. Historically a single failed `DBGETXML` (C-Gate reachable but the project
+not yet loaded, e.g. right after changing `cgate.host`) was enough to wipe every
+accessory in the bridge.
+
+The plugin now treats "I can't see any devices" as a fault, not as "the devices are
+gone":
+
+- **Discovery failures abort the pass.** If `PROJECT USE`/`PROJECT START` fails, the
+  client is not ready, `DBGETXML` returns nothing, or the project XML fails to parse,
+  discovery throws. Cached accessories are left registered untouched and the plugin
+  retries on the next restart.
+- **An empty result never removes anything.** If discovery returns zero devices while
+  accessories are cached, removal is skipped and a warning is logged.
+- **Bulk removal requires opt-in.** A single pass will not remove more than 20% of the
+  cached accessories. If you really are decommissioning a lot of groups, set
+  `"allowBulkRemoval": true`, restart, then set it back to `false`.
+
+If a restart logs `Refusing to remove N of M cached accessories`, check `cgate.host`
+and `cgate.project` before reaching for `allowBulkRemoval` — a typo in either looks
+exactly like a mass deletion.
+
+### config.json writes
+
+Newly discovered groups are appended to `config.json` as disabled overrides, which
+means the plugin shares the file with the Homebridge UI. Losing `groupOverrides` to a
+clobbered write has the same visible effect as the failure above — every group falls
+into the "no override → disabled" path and the accessories disappear — so the write is
+defensive:
+
+- Only the plugin's own platform block is modified; everything else passes through
+  untouched, including the file's existing indentation.
+- If `config.json` changes between the read and the write (a UI save landing at the
+  same moment), the plugin re-reads and re-applies rather than overwriting. After
+  three collisions it gives up without writing and tries again on the next restart.
+- The write goes to a temp file and is renamed over the original, so a crash or a
+  concurrent reader sees either the old file or the new one, never a truncated one.
+  The previous contents are kept as `config.json.bak`.
+- Overrides that are already present are skipped, so a retry cannot create duplicates,
+  and a rewrite that loses platforms or accessories is refused outright.
 
 ## Development
 

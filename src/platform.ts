@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, renameSync, statSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 
 import type {
   API,
@@ -10,7 +10,7 @@ import type {
   Service,
 } from 'homebridge';
 
-import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
+import { CONFIG_WRITE_ATTEMPTS, MAX_REMOVAL_FRACTION, PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { CGateClient } from './cgate/CGateClient.js';
 import type {
   CBusDevice,
@@ -90,7 +90,11 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
     try {
       await this.discoverDevices(cgateConfig);
     } catch (err) {
+      // Discovery failed, so we know nothing about what is present. Cached
+      // accessories are left registered untouched — removing them would destroy
+      // their HomeKit room and automation assignments over a transient fault.
       this.log.error(`Failed during device discovery: ${err instanceof Error ? err.message : err}`);
+      this.log.warn(`Keeping ${this.accessories.size} cached accessories registered until discovery succeeds.`);
     }
   }
 
@@ -207,11 +211,56 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
     }
 
     // Remove accessories no longer present in C-Bus
-    for (const [uuid, accessory] of this.accessories) {
-      if (!this.discoveredUUIDs.includes(uuid)) {
-        this.log.info('Removing accessory no longer present:', accessory.displayName);
-        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-      }
+    this.reconcileRemovals(devices.length);
+  }
+
+  /**
+   * Unregister cached accessories that discovery did not see again.
+   *
+   * Guarded, because removal is unrecoverable: HomeKit discards the accessory's
+   * room, custom name, scene and automation assignments, and re-registering the
+   * same UUID on a later restart does not restore them. A discovery result that
+   * is empty or drastically smaller than the cache is far more likely to mean
+   * C-Gate had a bad day (project not loaded, wrong host or project name) than
+   * to mean the installation actually shrank, so in that case nothing is
+   * removed and the reason is logged instead.
+   */
+  private reconcileRemovals(discoveredDeviceCount: number): void {
+    const cachedCount = this.accessories.size;
+    if (cachedCount === 0) {
+      return;
+    }
+
+    if (discoveredDeviceCount === 0) {
+      this.log.warn(
+        `Discovery returned no devices but ${cachedCount} accessories are cached — skipping removal. `
+        + 'Check the C-Gate host and project name; this is almost never devices actually disappearing.',
+      );
+      return;
+    }
+
+    const stale = [...this.accessories.values()].filter(
+      (accessory) => !this.discoveredUUIDs.includes(accessory.UUID),
+    );
+    if (stale.length === 0) {
+      return;
+    }
+
+    const limit = Math.max(1, Math.ceil(cachedCount * MAX_REMOVAL_FRACTION));
+    if (stale.length > limit && this.config.allowBulkRemoval !== true) {
+      this.log.warn(
+        `Refusing to remove ${stale.length} of ${cachedCount} cached accessories in one pass (limit ${limit}). `
+        + 'Removal destroys HomeKit room, scene and automation assignments, so this needs to be deliberate: '
+        + 'set "allowBulkRemoval": true in the platform config to allow it. '
+        + `Kept: ${stale.map((accessory) => accessory.displayName).join(', ')}`,
+      );
+      return;
+    }
+
+    for (const accessory of stale) {
+      this.log.info('Removing accessory no longer present:', accessory.displayName);
+      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      this.accessories.delete(accessory.UUID);
     }
   }
 
@@ -376,34 +425,129 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
     return map;
   }
 
+  /**
+   * Append newly discovered groups to config.json as disabled overrides.
+   *
+   * config.json is shared with the Homebridge UI, which rewrites the whole file
+   * on save. A naive read-modify-write can therefore clobber a concurrent UI
+   * save (or be clobbered by one), and losing `groupOverrides` makes every group
+   * fall into the "no override → disabled" path — i.e. the accessories vanish
+   * from the bridge. So: re-read and re-apply if the file moved under us, write
+   * via a temp file and rename so a reader never sees a half-written config, and
+   * refuse to write anything that does not round-trip.
+   */
   private appendOverridesToConfig(newOverrides: GroupOverride[]): void {
-    try {
-      const configPath = this.api.user.configPath();
-      const raw = readFileSync(configPath, 'utf-8');
-      const fullConfig = JSON.parse(raw);
+    const configPath = this.api.user.configPath();
 
-      // Find our platform entry
-      const platforms = fullConfig.platforms as Record<string, unknown>[] | undefined;
-      const ourPlatform = platforms?.find(
-        (p) => p.platform === PLATFORM_NAME,
-      );
+    for (let attempt = 1; attempt <= CONFIG_WRITE_ATTEMPTS; attempt++) {
+      try {
+        const statBefore = statSync(configPath);
+        const raw = readFileSync(configPath, 'utf-8');
+        const serialised = this.buildConfigWithOverrides(raw, newOverrides);
+        if (serialised === null) {
+          return;
+        }
 
-      if (!ourPlatform) {
-        this.log.warn('Could not find platform entry in config.json — new overrides not saved');
+        // Did another writer touch config.json between our read and our write?
+        // If so, our in-memory copy is stale — start over from the new content
+        // rather than overwriting their changes.
+        const statAfter = statSync(configPath);
+        if (statAfter.mtimeMs !== statBefore.mtimeMs || statAfter.size !== statBefore.size) {
+          this.log.warn(`config.json changed while updating it (attempt ${attempt}/${CONFIG_WRITE_ATTEMPTS}) — re-reading`);
+          continue;
+        }
+
+        this.writeConfigAtomically(configPath, raw, serialised);
+        this.log.info(`Added ${newOverrides.length} new disabled override(s) to config.json`);
+        return;
+      } catch (err) {
+        this.log.error(`Failed to update config.json with new overrides: ${err instanceof Error ? err.message : err}`);
         return;
       }
-
-      if (!Array.isArray(ourPlatform.groupOverrides)) {
-        ourPlatform.groupOverrides = [];
-      }
-
-      (ourPlatform.groupOverrides as GroupOverride[]).push(...newOverrides);
-
-      writeFileSync(configPath, JSON.stringify(fullConfig, null, 4), 'utf-8');
-      this.log.info(`Added ${newOverrides.length} new disabled override(s) to config.json`);
-    } catch (err) {
-      this.log.error(`Failed to update config.json with new overrides: ${err instanceof Error ? err.message : err}`);
     }
+
+    this.log.warn(
+      'Gave up updating config.json: it kept changing underneath us (is the Homebridge UI saving?). '
+      + 'No overrides were written and nothing was overwritten; they will be added on the next restart.',
+    );
+  }
+
+  /**
+   * Produce the new config.json content, or null if it should not be written.
+   * Only our own platform block is touched; the rest of the file is passed
+   * through unchanged, including its original indentation.
+   */
+  private buildConfigWithOverrides(raw: string, newOverrides: GroupOverride[]): string | null {
+    const fullConfig = JSON.parse(raw);
+
+    // Find our platform entry
+    const platforms = fullConfig.platforms as Record<string, unknown>[] | undefined;
+    const ourPlatform = platforms?.find(
+      (p) => p.platform === PLATFORM_NAME,
+    );
+
+    if (!ourPlatform) {
+      this.log.warn('Could not find platform entry in config.json — new overrides not saved');
+      return null;
+    }
+
+    if (!Array.isArray(ourPlatform.groupOverrides)) {
+      ourPlatform.groupOverrides = [];
+    }
+    const groupOverrides = ourPlatform.groupOverrides as GroupOverride[];
+
+    // Skip anything already present, so a retry after a clobbered write cannot
+    // produce duplicate entries.
+    const existing = new Set(groupOverrides.map((o) => `${o.address}/${o.channel ?? ''}`));
+    const toAdd = newOverrides.filter((o) => !existing.has(`${o.address}/${o.channel ?? ''}`));
+    if (toAdd.length === 0) {
+      return null;
+    }
+    groupOverrides.push(...toAdd);
+
+    const serialised = JSON.stringify(fullConfig, null, this.detectIndent(raw));
+
+    // Never write something we cannot read back, and never write a file that
+    // lost platforms or accessories along the way.
+    const roundTripped = JSON.parse(serialised);
+    const platformsOut = roundTripped.platforms as unknown[] | undefined;
+    const accessoriesIn = (fullConfig.accessories as unknown[] | undefined)?.length ?? 0;
+    const accessoriesOut = (roundTripped.accessories as unknown[] | undefined)?.length ?? 0;
+    if ((platformsOut?.length ?? 0) !== (platforms?.length ?? 0) || accessoriesOut !== accessoriesIn) {
+      this.log.error('Refusing to write config.json: the rewritten file did not match the original structure');
+      return null;
+    }
+
+    return serialised;
+  }
+
+  /**
+   * Write via a temp file in the same directory and rename over the original, so
+   * config.json is replaced in one step. A crash or a concurrent reader can only
+   * ever see the old file or the new one, never a truncated one. The previous
+   * contents are kept alongside as .bak.
+   */
+  private writeConfigAtomically(configPath: string, previous: string, contents: string): void {
+    const tmpPath = `${configPath}.${process.pid}.tmp`;
+    try {
+      writeFileSync(tmpPath, contents, 'utf-8');
+      copyFileSync(configPath, `${configPath}.bak`);
+      renameSync(tmpPath, configPath);
+    } catch (err) {
+      if (existsSync(tmpPath)) {
+        unlinkSync(tmpPath);
+      }
+      // The original is untouched unless the rename itself failed; either way,
+      // surface the previous size so a truncated file is obvious in the log.
+      this.log.error(`Atomic config.json write failed (previous content was ${previous.length} bytes)`);
+      throw err;
+    }
+  }
+
+  /** Preserve whatever indentation the file already uses rather than reformatting it. */
+  private detectIndent(raw: string): string | number {
+    const match = /\n([ \t]+)"/.exec(raw);
+    return match ? match[1] : 4;
   }
 
   private sanitiseDisplayName(name: string): string {

@@ -55,6 +55,12 @@
           }
         }
       },
+      "allowBulkRemoval": {
+        "title": "Allow Bulk Removal",
+        "type": "boolean",
+        "default": false,
+        "description": "Allow a single discovery pass to remove more than 20% of your accessories. Removal permanently destroys HomeKit room, scene and automation assignments, so leave this off unless you are deliberately decommissioning a lot of groups."
+      },
       "maxAccessories": {
         "title": "Max Accessories",
         "type": "integer",
@@ -166,6 +172,16 @@
       "description": "Optional web console for direct C-Gate command access.",
       "items": [
         { "key": "commander.port", "type": "number" }
+      ]
+    },
+    {
+      "type": "fieldset",
+      "title": "Advanced",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        "allowBulkRemoval",
+        { "key": "maxAccessories", "type": "number" }
       ]
     },
     {

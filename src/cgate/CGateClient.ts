@@ -39,6 +39,7 @@ export class CGateClient extends EventEmitter {
   private commandQueue: Array<{ cmd: string; timeout: number; resolve: (v: string) => void; reject: (e: Error) => void }> = [];
   private _ready = false;
   private virtualGroups = new Set<string>();
+  private hasConnected = false;
 
   constructor(
     private readonly config: CGateConfig,
@@ -60,8 +61,17 @@ export class CGateClient extends EventEmitter {
     this.eventConn.on('line', (line: string) => this.handleEventLine(line));
     this.scpConn.on('line', (line: string) => this.handleScpLine(line));
 
-    // Handle reconnections
-    this.commandConn.on('connected', () => this.initCommandPort());
+    // Handle reconnections. The initial connection is initialised by connect()
+    // below so that a PROJECT USE/START failure propagates to the caller; this
+    // handler only covers later reconnects, where there is nobody to throw to.
+    this.commandConn.on('connected', () => {
+      if (!this.hasConnected) {
+        return;
+      }
+      this.initCommandPort().catch((err) => {
+        this.log.error(`Failed to re-initialize command port: ${err instanceof Error ? err.message : err}`);
+      });
+    });
     this.commandConn.on('disconnected', () => {
       this._ready = false;
       this.rejectPendingCommand(new Error('Connection lost'));
@@ -80,7 +90,9 @@ export class CGateClient extends EventEmitter {
       this.connectPort(this.scpConn),
     ]);
 
-    // Initialize command port (project use/start)
+    // Initialize command port (project use/start). Failures propagate: the
+    // platform must not proceed to discovery against a project that never loaded.
+    this.hasConnected = true;
     await this.initCommandPort();
   }
 
@@ -143,9 +155,15 @@ export class CGateClient extends EventEmitter {
   }
 
   async discoverDevices(): Promise<CBusDevice[]> {
+    // An empty result is indistinguishable from "every device was deleted" by
+    // the time it reaches the platform, so unreachable/unloaded C-Gate must be
+    // reported as a failure rather than as an empty device list.
+    if (!this._ready) {
+      throw new Error('C-Gate client is not ready (project not loaded) — refusing to run discovery');
+    }
     const xmlContent = await this.fetchDbXml();
     if (!xmlContent) {
-      return [];
+      throw new Error(`DBGETXML returned no data for project ${this.config.project} — C-Gate reachable but the project database could not be read`);
     }
     return this.parseXmlDevices(xmlContent);
   }
@@ -161,20 +179,16 @@ export class CGateClient extends EventEmitter {
   }
 
   private async initCommandPort(): Promise<void> {
-    try {
-      // Wait briefly for the 201 greeting
-      await this.delay(500);
+    // Wait briefly for the 201 greeting
+    await this.delay(500);
 
-      await this.sendCommand(`PROJECT USE ${this.config.project}`);
-      await this.sendCommand(`PROJECT START ${this.config.project}`);
+    await this.sendCommand(`PROJECT USE ${this.config.project}`);
+    await this.sendCommand(`PROJECT START ${this.config.project}`);
 
-      this.startKeepalive();
-      this._ready = true;
-      this.log.info('C-Gate client ready');
-      this.emit('ready');
-    } catch (err) {
-      this.log.error(`Failed to initialize command port: ${err instanceof Error ? err.message : err}`);
-    }
+    this.startKeepalive();
+    this._ready = true;
+    this.log.info('C-Gate client ready');
+    this.emit('ready');
   }
 
   private initEventPort(): void {
@@ -443,7 +457,10 @@ export class CGateClient extends EventEmitter {
         }
       }
     } catch (err) {
+      // Rethrow: a partially parsed list would look like devices having been
+      // removed from the installation and trigger accessory removal.
       this.log.error(`XML parsing error: ${err instanceof Error ? err.message : err}`);
+      throw err instanceof Error ? err : new Error(String(err));
     }
 
     this.log.info(`Discovered ${devices.length} C-Bus groups`);
