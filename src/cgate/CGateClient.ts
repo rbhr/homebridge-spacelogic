@@ -40,15 +40,20 @@ export class CGateClient extends EventEmitter {
   private _ready = false;
   private virtualGroups = new Set<string>();
   private hasConnected = false;
+  private unparsedScpKinds = new Set<string>();
 
   constructor(
     private readonly config: CGateConfig,
     private readonly log: Logging,
   ) {
     super();
+    // Only the command port gets an idle timeout: the NOOP keepalive keeps it
+    // fed, so silence there really does mean the port has wedged. The event and
+    // SCP ports are silent whenever the C-Bus network is quiet, and recycling
+    // them on a timer loses state changes during every reconnect.
     this.commandConn = new CGateConnection(config.host, config.commandPort, 'CMD', log);
-    this.eventConn = new CGateConnection(config.host, config.eventPort, 'EVT', log);
-    this.scpConn = new CGateConnection(config.host, config.scpPort, 'SCP', log);
+    this.eventConn = new CGateConnection(config.host, config.eventPort, 'EVT', log, 0);
+    this.scpConn = new CGateConnection(config.host, config.scpPort, 'SCP', log, 0);
   }
 
   get ready(): boolean {
@@ -318,7 +323,14 @@ export class CGateClient extends EventEmitter {
     if (event) {
       this.emit('scpEvent', event);
     } else {
-      this.log.debug(`Unparsed SCP line: ${line}`);
+      // Applications we do not model (aircon, trigger control, ...) chatter
+      // continuously. Log each unrecognised message type once so a genuinely
+      // new one is still discoverable, then stay quiet about it.
+      const kind = line.replace(/^#\s*/, '').split(/\s+/).slice(0, 2).join(' ');
+      if (!this.unparsedScpKinds.has(kind)) {
+        this.unparsedScpKinds.add(kind);
+        this.log.debug(`Ignoring unhandled SCP message type "${kind}" (further occurrences suppressed): ${line}`);
+      }
     }
   }
 

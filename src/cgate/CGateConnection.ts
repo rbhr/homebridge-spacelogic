@@ -2,7 +2,7 @@ import { Socket } from 'node:net';
 import { EventEmitter } from 'node:events';
 import type { Logging } from 'homebridge';
 
-import { CMD_BUFFER_LIMIT } from './types.js';
+import { CMD_BUFFER_LIMIT, DEFAULT_IDLE_TIMEOUT, TCP_KEEPALIVE_DELAY } from './types.js';
 
 const INITIAL_RECONNECT_DELAY = 2000;
 const MAX_RECONNECT_DELAY = 60000;
@@ -16,11 +16,20 @@ export class CGateConnection extends EventEmitter {
   private _connected = false;
   private destroyed = false;
 
+  /**
+   * @param idleTimeout Milliseconds of silence after which the socket is treated
+   *   as dead and recycled. Pass 0 to disable, which is right for ports that are
+   *   legitimately idle for long stretches — a quiet C-Bus network produces no
+   *   event or SCP traffic at all, and recycling those sockets on a timer just
+   *   drops state changes during each reconnect. Liveness on those ports comes
+   *   from TCP keepalive instead.
+   */
   constructor(
     private readonly host: string,
     private readonly port: number,
     private readonly label: string,
     private readonly log: Logging,
+    private readonly idleTimeout: number = DEFAULT_IDLE_TIMEOUT,
   ) {
     super();
   }
@@ -78,11 +87,16 @@ export class CGateConnection extends EventEmitter {
     });
 
     this.socket.on('timeout', () => {
-      this.log.warn(`[${this.label}] Socket timeout`);
+      this.log.warn(`[${this.label}] Socket timeout after ${this.idleTimeout / 1000}s of silence`);
       this.socket?.destroy();
     });
 
-    this.socket.setTimeout(120_000);
+    // Detect a peer that has gone away without relying on inbound traffic, so
+    // the idle timeout above is not the only liveness check.
+    this.socket.setKeepAlive(true, TCP_KEEPALIVE_DELAY);
+    if (this.idleTimeout > 0) {
+      this.socket.setTimeout(this.idleTimeout);
+    }
     this.socket.connect(this.port, this.host);
   }
 
