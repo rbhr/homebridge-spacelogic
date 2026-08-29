@@ -133,4 +133,13 @@ web_modules/
 .yarn/build-state.yml
 .pnp.*
 
+# Homebridge config used by "npm run watch"
 test/
+
+# Tests
+tests
+build-tests
+tsconfig.test.json
+
+# Local editor/agent settings
+.claude
