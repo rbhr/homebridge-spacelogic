@@ -8,7 +8,8 @@ import type { SpaceLogicPlatform } from '../platform.js';
 import type { DeviceContext, ScpLightingEvent, ScpMeasurementEvent } from '../cgate/types.js';
 
 export abstract class BaseAccessory {
-  protected readonly device: DeviceContext;
+  /** Public so the platform can resynchronise handlers after a reconnect. */
+  public readonly device: DeviceContext;
   protected readonly log: Logging;
 
   constructor(
