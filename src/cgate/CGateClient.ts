@@ -22,6 +22,9 @@ const SCP_LIGHTING_PATTERN = /^lighting\s+(on|off|ramp)\s+\/\/(\S+?)\/(\d+)\/(\d
 const SCP_MEASUREMENT_PATTERN = /^measurement\s+data\s+\/\/(\S+?)\/(\d+)\/(\d+)\/(\d+)\/(\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)/;
 const LEVEL_RESPONSE_PATTERN = /^300\s+\S+:\s+level=(\d+)/;
 
+const HANDSHAKE_RETRY_BASE_DELAY = 2000;
+const HANDSHAKE_RETRY_MAX_DELAY = 60000;
+
 interface PendingCommand {
   resolve: (value: string) => void;
   reject: (reason: Error) => void;
@@ -39,7 +42,10 @@ export class CGateClient extends EventEmitter {
   private commandQueue: Array<{ cmd: string; timeout: number; resolve: (v: string) => void; reject: (e: Error) => void }> = [];
   private _ready = false;
   private virtualGroups = new Set<string>();
-  private hasConnected = false;
+  private started = false;
+  private initializing = false;
+  private handshakeFailures = 0;
+  private handshakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private unparsedScpKinds = new Set<string>();
 
   constructor(
@@ -60,26 +66,67 @@ export class CGateClient extends EventEmitter {
     return this._ready;
   }
 
-  async connect(): Promise<void> {
+  /**
+   * Start (and keep) all three C-Gate connections.
+   *
+   * Deliberately does not throw and does not wait for success. Every path back
+   * to a working client — first boot, a dropped link, C-Gate restarting, a
+   * handshake that failed — is the same path: the connection layer retries with
+   * backoff, and each successful handshake emits 'ready'. Callers watch for
+   * 'ready' rather than awaiting a one-shot connect, so an outage at startup is
+   * no different from an outage an hour in.
+   */
+  connect(): void {
+    if (this.started) {
+      return;
+    }
+    this.started = true;
+
     // Set up line handlers before connecting
     this.commandConn.on('line', (line: string) => this.handleCommandLine(line));
     this.eventConn.on('line', (line: string) => this.handleEventLine(line));
     this.scpConn.on('line', (line: string) => this.handleScpLine(line));
 
-    // Handle reconnections. The initial connection is initialised by connect()
-    // below so that a PROJECT USE/START failure propagates to the caller; this
-    // handler only covers later reconnects, where there is nobody to throw to.
     this.commandConn.on('connected', () => {
-      if (!this.hasConnected) {
-        return;
-      }
-      this.initCommandPort().catch((err) => {
-        this.log.error(`Failed to re-initialize command port: ${err instanceof Error ? err.message : err}`);
-      });
+      this.initCommandPort()
+        .then(() => {
+          this.handshakeFailures = 0;
+        })
+        .catch((err) => {
+          // The socket is up but the project never loaded, so the port is useless
+          // as it stands. Recycle it so the reconnect backoff — the only code that
+          // retries forever — gets another go at the handshake.
+          //
+          // Backed off separately from the socket backoff, which resets on every
+          // successful TCP connect: a wrong project name reconnects fine and fails
+          // the handshake every time, and retrying that twice a second would bury
+          // the log in identical errors.
+          this.handshakeFailures++;
+          const backoff = Math.min(
+            HANDSHAKE_RETRY_BASE_DELAY * 2 ** (this.handshakeFailures - 1),
+            HANDSHAKE_RETRY_MAX_DELAY,
+          );
+          this.log.error(
+            `Failed to initialize command port (attempt ${this.handshakeFailures}): `
+            + `${err instanceof Error ? err.message : err}. Retrying in ${backoff / 1000}s`,
+          );
+
+          if (this.handshakeRetryTimer) {
+            clearTimeout(this.handshakeRetryTimer);
+          }
+          this.handshakeRetryTimer = setTimeout(() => {
+            this.handshakeRetryTimer = null;
+            // A reconnect may have got through on its own in the meantime; do not
+            // tear down a port that is working again.
+            if (!this._ready && !this.initializing) {
+              this.commandConn.reset();
+            }
+          }, backoff);
+        });
     });
     this.commandConn.on('disconnected', () => {
       this._ready = false;
-      this.rejectPendingCommand(new Error('Connection lost'));
+      this.failAllCommands(new Error('Connection lost'));
       this.emit('disconnected');
     });
 
@@ -88,17 +135,9 @@ export class CGateClient extends EventEmitter {
       this.log.debug('SCP port connected, listening for state changes');
     });
 
-    // Connect all three ports
-    await Promise.all([
-      this.connectPort(this.commandConn),
-      this.connectPort(this.eventConn),
-      this.connectPort(this.scpConn),
-    ]);
-
-    // Initialize command port (project use/start). Failures propagate: the
-    // platform must not proceed to discovery against a project that never loaded.
-    this.hasConnected = true;
-    await this.initCommandPort();
+    this.commandConn.connect();
+    this.eventConn.connect();
+    this.scpConn.connect();
   }
 
   async disconnect(): Promise<void> {
@@ -107,7 +146,11 @@ export class CGateClient extends EventEmitter {
       clearInterval(this.keepaliveTimer);
       this.keepaliveTimer = null;
     }
-    this.rejectPendingCommand(new Error('Disconnecting'));
+    if (this.handshakeRetryTimer) {
+      clearTimeout(this.handshakeRetryTimer);
+      this.handshakeRetryTimer = null;
+    }
+    this.failAllCommands(new Error('Disconnecting'));
     this.commandConn.disconnect();
     this.eventConn.disconnect();
     this.scpConn.disconnect();
@@ -159,6 +202,35 @@ export class CGateClient extends EventEmitter {
     }
   }
 
+  /**
+   * Like getLevel, but distinguishes "the group is at 0" from "the read failed".
+   *
+   * getLevel folds both onto 0, which is fine when seeding an accessory that
+   * already defaults to off, but wrong when resynchronising after an outage:
+   * treating a failed read as 0 would switch every light off in HomeKit.
+   */
+  async tryGetLevel(address: string): Promise<number | null> {
+    if (this.virtualGroups.has(address)) {
+      return null;
+    }
+    try {
+      const response = await this.sendCommand(`GET ${address} level`);
+      const match = LEVEL_RESPONSE_PATTERN.exec(response);
+      if (match) {
+        return parseInt(match[1], 10);
+      }
+      this.log.warn(`Unexpected GET level response: ${response}`);
+      return null;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('401')) {
+        this.log.debug(`Group ${address} is virtual (no physical unit), marking`);
+        this.virtualGroups.add(address);
+      }
+      return null;
+    }
+  }
+
   async discoverDevices(): Promise<CBusDevice[]> {
     // An empty result is indistinguishable from "every device was deleted" by
     // the time it reaches the platform, so unreachable/unloaded C-Gate must be
@@ -175,25 +247,41 @@ export class CGateClient extends EventEmitter {
 
   // --- Private methods ---
 
-  private connectPort(conn: CGateConnection): Promise<void> {
-    return new Promise((resolve, reject) => {
-      conn.once('connected', () => resolve());
-      conn.once('error', (err: Error) => reject(err));
-      conn.connect();
-    });
+  /**
+   * Fail the in-flight command and everything still queued behind it.
+   *
+   * Queued commands are settled explicitly rather than left for processQueue to
+   * discover, so a HomeKit request made during an outage gets a prompt error
+   * instead of hanging until its own timeout.
+   */
+  private failAllCommands(error: Error): void {
+    this.rejectPendingCommand(error);
+    const queued = this.commandQueue.splice(0, this.commandQueue.length);
+    for (const { reject } of queued) {
+      reject(error);
+    }
   }
 
   private async initCommandPort(): Promise<void> {
-    // Wait briefly for the 201 greeting
-    await this.delay(500);
+    if (this.initializing) {
+      return;
+    }
+    this.initializing = true;
 
-    await this.sendCommand(`PROJECT USE ${this.config.project}`);
-    await this.sendCommand(`PROJECT START ${this.config.project}`);
+    try {
+      // Wait briefly for the 201 greeting
+      await this.delay(500);
 
-    this.startKeepalive();
-    this._ready = true;
-    this.log.info('C-Gate client ready');
-    this.emit('ready');
+      await this.sendCommand(`PROJECT USE ${this.config.project}`);
+      await this.sendCommand(`PROJECT START ${this.config.project}`);
+
+      this.startKeepalive();
+      this._ready = true;
+      this.log.info('C-Gate client ready');
+      this.emit('ready');
+    } finally {
+      this.initializing = false;
+    }
   }
 
   private initEventPort(): void {

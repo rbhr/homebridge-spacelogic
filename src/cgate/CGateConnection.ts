@@ -7,6 +7,7 @@ import { CMD_BUFFER_LIMIT, DEFAULT_IDLE_TIMEOUT, TCP_KEEPALIVE_DELAY } from './t
 const INITIAL_RECONNECT_DELAY = 2000;
 const MAX_RECONNECT_DELAY = 60000;
 const RECONNECT_BACKOFF_FACTOR = 2;
+const RECONNECT_JITTER_FRACTION = 0.2;
 
 export class CGateConnection extends EventEmitter {
   private socket: Socket | null = null;
@@ -43,19 +44,39 @@ export class CGateConnection extends EventEmitter {
       return;
     }
 
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // Drop any previous socket first. Its handlers are still live otherwise, and
+    // a late 'close' from it would schedule a second, parallel reconnect chain
+    // for this port — each of which keeps spawning more.
+    this.teardownSocket();
+
     this.log.debug(`[${this.label}] Connecting to ${this.host}:${this.port}`);
 
-    this.socket = new Socket();
+    const socket = new Socket();
+    this.socket = socket;
     this.buffer = '';
 
-    this.socket.on('connect', () => {
+    // Events from a socket we have already replaced must not touch our state.
+    const isCurrent = (): boolean => this.socket === socket;
+
+    socket.on('connect', () => {
+      if (!isCurrent()) {
+        return;
+      }
       this.log.info(`[${this.label}] Connected to ${this.host}:${this.port}`);
       this._connected = true;
       this.reconnectDelay = INITIAL_RECONNECT_DELAY;
       this.emit('connected');
     });
 
-    this.socket.on('data', (data: Buffer) => {
+    socket.on('data', (data: Buffer) => {
+      if (!isCurrent()) {
+        return;
+      }
       this.buffer += data.toString();
 
       if (this.buffer.length > CMD_BUFFER_LIMIT) {
@@ -74,30 +95,64 @@ export class CGateConnection extends EventEmitter {
       }
     });
 
-    this.socket.on('close', () => {
+    socket.on('close', () => {
+      if (!isCurrent()) {
+        return;
+      }
+      this.socket = null;
       this.log.debug(`[${this.label}] Connection closed`);
+      const wasConnected = this._connected;
       this._connected = false;
-      this.emit('disconnected');
+      if (wasConnected) {
+        this.emit('disconnected');
+      }
       this.scheduleReconnect();
     });
 
-    this.socket.on('error', (err: Error) => {
+    socket.on('error', (err: Error) => {
+      if (!isCurrent()) {
+        return;
+      }
       this.log.error(`[${this.label}] Socket error: ${err.message}`);
-      this.emit('error', err);
+      // Only emit when somebody is actually listening. An EventEmitter 'error'
+      // with no listener is rethrown by Node and takes the whole bridge process
+      // down — which is what used to happen on the second network failure, since
+      // the one-shot listener that used to be here was consumed by the first.
+      // Nothing is lost by swallowing it: a socket error is always followed by
+      // 'close', and 'close' drives the reconnect.
+      if (this.listenerCount('error') > 0) {
+        this.emit('error', err);
+      }
     });
 
-    this.socket.on('timeout', () => {
+    socket.on('timeout', () => {
+      if (!isCurrent()) {
+        return;
+      }
       this.log.warn(`[${this.label}] Socket timeout after ${this.idleTimeout / 1000}s of silence`);
-      this.socket?.destroy();
+      socket.destroy();
     });
 
     // Detect a peer that has gone away without relying on inbound traffic, so
     // the idle timeout above is not the only liveness check.
-    this.socket.setKeepAlive(true, TCP_KEEPALIVE_DELAY);
+    socket.setKeepAlive(true, TCP_KEEPALIVE_DELAY);
     if (this.idleTimeout > 0) {
-      this.socket.setTimeout(this.idleTimeout);
+      socket.setTimeout(this.idleTimeout);
     }
-    this.socket.connect(this.port, this.host);
+
+    try {
+      socket.connect(this.port, this.host);
+    } catch (err) {
+      // connect() can throw synchronously when the host is unresolvable or the
+      // network stack refuses the call outright. Treat it exactly like an async
+      // failure so the backoff keeps running instead of the port dying here.
+      this.log.error(`[${this.label}] Connect failed: ${err instanceof Error ? err.message : err}`);
+      this.socket = null;
+      socket.removeAllListeners();
+      socket.on('error', () => {});
+      socket.destroy();
+      this.scheduleReconnect();
+    }
   }
 
   write(data: string): void {
@@ -107,30 +162,70 @@ export class CGateConnection extends EventEmitter {
     this.socket.write(data + '\r\n');
   }
 
+  /**
+   * Recycle the socket and let the backoff bring it back.
+   *
+   * For a port that is up at the TCP level but unusable at the protocol level —
+   * the C-Gate handshake failed, say — closing it is the only way back into the
+   * normal reconnect path, which is the one piece of code that knows how to
+   * retry forever.
+   */
+  reset(): void {
+    if (this.destroyed) {
+      return;
+    }
+
+    const hadSocket = this.socket !== null;
+    const wasConnected = this._connected;
+    this._connected = false;
+    this.teardownSocket();
+
+    if (wasConnected) {
+      this.emit('disconnected');
+    }
+    if (hadSocket || !this.reconnectTimer) {
+      this.scheduleReconnect();
+    }
+  }
+
   disconnect(): void {
     this.destroyed = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.socket) {
-      this.socket.removeAllListeners();
-      this.socket.destroy();
-      this.socket = null;
-    }
+    this.teardownSocket();
     this._connected = false;
   }
 
+  private teardownSocket(): void {
+    const socket = this.socket;
+    if (!socket) {
+      return;
+    }
+    this.socket = null;
+    socket.removeAllListeners();
+    // destroy() can surface a pending error, and a socket with no 'error'
+    // listener throws it at the process. Keep a sink attached.
+    socket.on('error', () => {});
+    socket.destroy();
+  }
+
   private scheduleReconnect(): void {
-    if (this.destroyed) {
+    if (this.destroyed || this.reconnectTimer) {
       return;
     }
 
-    this.log.info(`[${this.label}] Reconnecting in ${this.reconnectDelay / 1000}s`);
+    // Spread the three ports out a little so they do not all hammer C-Gate in
+    // the same millisecond after an outage.
+    const jitter = Math.round(this.reconnectDelay * RECONNECT_JITTER_FRACTION * Math.random());
+    const delay = this.reconnectDelay + jitter;
+
+    this.log.info(`[${this.label}] Reconnecting in ${Math.round(delay / 100) / 10}s`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
-    }, this.reconnectDelay);
+    }, delay);
 
     this.reconnectDelay = Math.min(
       this.reconnectDelay * RECONNECT_BACKOFF_FACTOR,

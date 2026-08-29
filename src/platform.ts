@@ -26,6 +26,9 @@ import type { BaseAccessory } from './accessories/BaseAccessory.js';
 import { createAccessory } from './accessories/AccessoryFactory.js';
 import { HttpCommander } from './commander/HttpCommander.js';
 
+/** How long to wait before re-attempting a discovery that failed while C-Gate stayed connected. */
+const DISCOVERY_RETRY_DELAY = 60_000;
+
 export class SpaceLogicPlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service;
   public readonly Characteristic: typeof Characteristic;
@@ -34,6 +37,9 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
   private readonly accessoryHandlers: Map<string, BaseAccessory> = new Map();
   private readonly discoveredUUIDs: string[] = [];
   private httpCommander: HttpCommander | null = null;
+  private discoveryComplete = false;
+  private discoveryInFlight = false;
+  private discoveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   public cgateClient!: CGateClient;
 
@@ -72,34 +78,130 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
 
     this.cgateClient.on('scpEvent', (event: ScpEvent) => this.handleScpEvent(event));
 
-    try {
-      await this.cgateClient.connect();
-      this.log.info('Connected to C-Gate server');
-    } catch (err) {
-      this.log.error(`Failed to connect to C-Gate: ${err instanceof Error ? err.message : err}`);
-      return;
-    }
+    // Everything downstream hangs off 'ready' rather than off a one-shot connect.
+    // C-Gate being unreachable at startup is the same condition as C-Gate going
+    // away later, so both are handled by waiting for the next successful
+    // handshake instead of giving up on the first failure.
+    this.cgateClient.on('ready', () => {
+      this.onCGateReady(cgateConfig);
+    });
+    this.cgateClient.on('disconnected', () => {
+      this.log.warn('C-Gate connection lost — accessories will stop responding until it is back. Retrying.');
+    });
 
-    // Start HTTP Commander if configured
+    // Start HTTP Commander if configured. It comes up regardless of C-Gate's
+    // state so the console is available to diagnose an outage, not only after one
+    // has cleared.
     const commanderPort = (this.config.commander?.port as number | undefined) ?? 0;
     if (commanderPort > 0) {
       this.httpCommander = new HttpCommander(commanderPort, this.cgateClient, this.log);
       this.httpCommander.start();
     }
 
-    try {
-      await this.discoverDevices(cgateConfig);
-    } catch (err) {
-      // Discovery failed, so we know nothing about what is present. Cached
-      // accessories are left registered untouched — removing them would destroy
-      // their HomeKit room and automation assignments over a transient fault.
-      this.log.error(`Failed during device discovery: ${err instanceof Error ? err.message : err}`);
-      this.log.warn(`Keeping ${this.accessories.size} cached accessories registered until discovery succeeds.`);
+    this.cgateClient.connect();
+  }
+
+  /**
+   * Called on every successful C-Gate handshake, including reconnects.
+   *
+   * The first one that gets through runs discovery; later ones only resync device
+   * state, since re-running discovery on every reconnect would rewrite
+   * config.json and re-drive accessory reconciliation for no gain.
+   */
+  private async onCGateReady(cgateConfig: CGateConfig): Promise<void> {
+    if (this.discoveryInFlight) {
+      return;
     }
+    this.discoveryInFlight = true;
+
+    try {
+      if (!this.discoveryComplete) {
+        this.log.info('Connected to C-Gate server');
+        await this.discoverDevices(cgateConfig);
+        this.discoveryComplete = true;
+      } else {
+        this.log.info('Reconnected to C-Gate server — resynchronising device state');
+        await this.refreshDeviceStates();
+      }
+    } catch (err) {
+      const what = this.discoveryComplete ? 'state resynchronisation' : 'device discovery';
+      this.log.error(`Failed during ${what}: ${err instanceof Error ? err.message : err}`);
+
+      if (!this.discoveryComplete) {
+        // Discovery failed, so we know nothing about what is present. Cached
+        // accessories are left registered untouched — removing them would destroy
+        // their HomeKit room and automation assignments over a transient fault.
+        this.log.warn(`Keeping ${this.accessories.size} cached accessories registered until discovery succeeds.`);
+        // A reconnect is not guaranteed to follow: C-Gate can stay happily
+        // connected while DBGETXML fails. Without a timer this would be the one
+        // path that never retries.
+        this.scheduleDiscoveryRetry(cgateConfig);
+      }
+    } finally {
+      this.discoveryInFlight = false;
+    }
+  }
+
+  private scheduleDiscoveryRetry(cgateConfig: CGateConfig): void {
+    if (this.discoveryRetryTimer) {
+      return;
+    }
+
+    this.log.info(`Retrying discovery in ${DISCOVERY_RETRY_DELAY / 1000}s`);
+    this.discoveryRetryTimer = setTimeout(() => {
+      this.discoveryRetryTimer = null;
+      if (this.discoveryComplete || !this.cgateClient.ready) {
+        return;
+      }
+      this.onCGateReady(cgateConfig);
+    }, DISCOVERY_RETRY_DELAY);
+  }
+
+  /**
+   * Re-read every group's level after a reconnect.
+   *
+   * SCP events emitted while the socket was down are gone, so HomeKit is showing
+   * whatever was true before the outage. Reads that fail are skipped rather than
+   * treated as level 0, so a partial resync never switches accessories off in the
+   * Home app.
+   */
+  private async refreshDeviceStates(): Promise<void> {
+    // Driven off the handler map rather than the cached-accessory map: handlers
+    // exist for accessories created during this run as well as restored ones, and
+    // only a handler can actually push a value into HomeKit.
+    const targets = [...this.accessoryHandlers.values()]
+      .filter((handler) => handler.device && handler.device.type !== 'temperatureSensor');
+
+    let refreshed = 0;
+    for (const handler of targets) {
+      const device = handler.device;
+      const level = await this.cgateClient.tryGetLevel(device.address);
+      if (level === null) {
+        continue;
+      }
+
+      const event: ScpLightingEvent = {
+        kind: 'lighting',
+        action: 'ramp',
+        project: '',
+        network: device.network,
+        application: device.application,
+        group: device.group,
+        level: Math.round(level * 100 / 255),
+      };
+      handler.handleLightingEvent(event);
+      refreshed++;
+    }
+
+    this.log.info(`Resynchronised ${refreshed} of ${targets.length} accessories after reconnect`);
   }
 
   private shutdown(): void {
     this.log.info('Shutting down SpaceLogic platform');
+    if (this.discoveryRetryTimer) {
+      clearTimeout(this.discoveryRetryTimer);
+      this.discoveryRetryTimer = null;
+    }
     if (this.httpCommander) {
       this.httpCommander.stop();
       this.httpCommander = null;
@@ -127,6 +229,9 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
 
   private async discoverDevices(cgateConfig: CGateConfig): Promise<void> {
     const devices = await this.cgateClient.discoverDevices();
+    // A previous failed pass may have left entries behind; stale UUIDs here would
+    // make reconcileRemovals spare accessories that are genuinely gone.
+    this.discoveredUUIDs.length = 0;
     const overrides = this.getGroupOverrides();
     const maxAccessories = (this.config.maxAccessories as number | undefined) ?? 0;
     let count = 0;
@@ -305,6 +410,10 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
       const accessory = new this.api.platformAccessory(displayName, uuid);
       accessory.context.device = deviceContext;
       newAccessories.push(accessory);
+      // Also record it here. Until the next restart repopulates this map from the
+      // cache, it is otherwise missing everything created this run, which makes
+      // the platform's own inventory wrong mid-session.
+      this.accessories.set(uuid, accessory);
     }
 
     this.discoveredUUIDs.push(uuid);
