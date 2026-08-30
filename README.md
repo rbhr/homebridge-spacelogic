@@ -16,17 +16,23 @@
 
 A [Homebridge](https://homebridge.io) dynamic platform plugin for **Clipsal/Schneider Electric C-Bus** lighting and sensor networks, connecting to Apple HomeKit via a [C-Gate](https://www.clipsal.com/products/detail?CatNo=5500CGE) server.
 
+> **New to the plugin?** Nothing appears in HomeKit after the first start — that is by
+> design. Read [First Run](#first-run) before you go looking for a fault.
+
 ## Features
 
 - **Automatic discovery** of C-Bus groups via C-Gate DBGETXML
+- **Opt-in devices** — discovered groups are written into your config disabled, so you pick what reaches HomeKit instead of getting every group in the project
 - **Real-time status updates** via C-Gate SCP (Status Change Port) — instant feedback when lights are controlled from physical switches
 - **8 accessory types** — dimmer, relay, switch, fan, cover/shutter, motion sensor, contact sensor, temperature sensor
 - **Group overrides** — customise device type, name, and options per C-Bus group
 - **Temperature sensors** — supports C-Bus Measurement Application (app 228) with multi-channel devices
+- **Outage recovery** — reconnects with backoff and resynchronises state when C-Gate or the network goes away, rather than dying and needing a manual restart
+- **Safe by default** — a failed or suspiciously empty discovery never deletes your HomeKit accessories (see [Accessory Removal Safety](#accessory-removal-safety))
 - **HTTP Commander** — optional built-in web console for direct C-Gate command access with real-time event streaming
 - **Config UI support** — full settings UI via [homebridge-config-ui-x](https://github.com/homebridge/homebridge-config-ui-x)
 - **Homebridge 2.0** compatible (also works with Homebridge v1.8+)
-- **Zero external runtime dependencies** beyond `fast-xml-parser` for C-Gate XML parsing
+- **One runtime dependency** — `fast-xml-parser`, for the C-Gate project database
 
 ## Requirements
 
@@ -69,13 +75,53 @@ Add the following to your Homebridge `config.json` under `platforms`:
     "platform": "SpaceLogicPlatform",
     "cgate": {
         "host": "192.168.1.100",
-        "project": "HOME",
-        "network": 254
+        "project": "HOME"
     }
 }
 ```
 
-This will connect to C-Gate, discover all groups in the lighting application (app 56), and expose them as dimmable lights in HomeKit.
+`host` and `project` are the only required settings. This connects to C-Gate and discovers
+every named group in your project — but it does not expose any of them yet. See below.
+
+## First Run
+
+**The first start registers no accessories. This is intentional.**
+
+A C-Bus project usually contains far more groups than you want in the Home app, and HomeKit
+caps a single bridge at 150 accessories. So instead of exposing everything it finds, the
+plugin turns discovery into a checklist for you to tick:
+
+1. **Start Homebridge.** The plugin connects to C-Gate, runs `DBGETXML`, and finds every
+   named group in the lighting (56) and measurement (228) applications. The log shows one
+   line per group:
+
+   ```
+   New device discovered: 254/56/1 (Kitchen Downlights) — adding as disabled override
+   ```
+
+2. **It writes them into `config.json`**, each as a *disabled* `groupOverrides` entry:
+
+   ```json
+   { "address": "254/56/1", "type": "dimmer", "name": "Kitchen Downlights", "enabled": false }
+   ```
+
+   Nothing else in the file is touched, and the previous contents are kept as
+   `config.json.bak`.
+
+3. **Enable the ones you want.** In the Homebridge Config UI, open the plugin settings and
+   tick **Enabled** on each group you want in HomeKit — the addresses and names are already
+   filled in for you. Change **Device Type** at the same time if the group is a relay, fan,
+   cover or sensor rather than a dimmer.
+
+4. **Restart Homebridge.** The enabled groups appear in the Home app.
+
+Groups added to your C-Bus project later get appended as new disabled overrides on the next
+restart, so the same tick-and-restart applies. Entries already in the file are never
+duplicated and never re-enabled behind your back.
+
+> **`type` is required on every override.** An entry without a `type` is ignored entirely —
+> including its `enabled: true` — and the group will not appear in HomeKit. The overrides the
+> plugin writes for you always include one; keep it if you hand-edit.
 
 ### Full Config
 
@@ -88,8 +134,7 @@ This will connect to C-Gate, discover all groups in the lighting application (ap
         "commandPort": 20023,
         "eventPort": 20024,
         "scpPort": 20025,
-        "project": "HOME",
-        "network": 254
+        "project": "HOME"
     },
     "commander": {
         "port": 8980
@@ -109,12 +154,14 @@ This will connect to C-Gate, discover all groups in the lighting application (ap
         {
             "address": "254/56/20",
             "type": "relay",
-            "name": "Garage Light"
+            "name": "Garage Light",
+            "enabled": true
         },
         {
             "address": "254/56/50",
             "type": "switch",
             "name": "Garden Irrigation",
+            "enabled": true,
             "options": {
                 "autoOff": 3600
             }
@@ -122,12 +169,14 @@ This will connect to C-Gate, discover all groups in the lighting application (ap
         {
             "address": "254/56/60",
             "type": "fan",
-            "name": "Bedroom Fan"
+            "name": "Bedroom Fan",
+            "enabled": true
         },
         {
             "address": "254/56/70",
             "type": "cover",
             "name": "Lounge Blinds",
+            "enabled": true,
             "options": {
                 "travelTime": 30
             }
@@ -135,21 +184,26 @@ This will connect to C-Gate, discover all groups in the lighting application (ap
         {
             "address": "254/56/80",
             "type": "motionSensor",
-            "name": "Front Door Motion"
+            "name": "Front Door Motion",
+            "enabled": true
         },
         {
             "address": "254/56/90",
             "type": "contactSensor",
-            "name": "Garage Door"
+            "name": "Garage Door",
+            "enabled": true
         },
         {
             "address": "254/228/1",
             "type": "temperatureSensor",
             "name": "Living Room Temperature",
-            "channel": 1
+            "channel": 1,
+            "enabled": true
         },
         {
             "address": "254/56/100",
+            "type": "dimmer",
+            "name": "Spare Circuit",
             "enabled": false
         }
     ]
@@ -161,32 +215,54 @@ This will connect to C-Gate, discover all groups in the lighting application (ap
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | `"SpaceLogic C-Bus"` | Platform display name |
-| `cgate.host` | string | `"localhost"` | C-Gate server hostname or IP |
+| `cgate.host` | string | *(required)* | C-Gate server hostname or IP |
+| `cgate.project` | string | *(required)* | C-Gate project name |
 | `cgate.commandPort` | integer | `20023` | C-Gate command port |
 | `cgate.eventPort` | integer | `20024` | C-Gate event port |
 | `cgate.scpPort` | integer | `20025` | C-Gate status change port |
-| `cgate.project` | string | *(required)* | C-Gate project name |
-| `cgate.network` | integer | `254` | Default C-Bus network number |
-| `commander.port` | integer | `0` | HTTP Commander port (0 = disabled) |
-| `maxAccessories` | integer | `0` | Limit registered accessories (0 = unlimited) |
+| `cgate.network` | integer | `254` | Reserved. Networks come from the discovered address or from the override's own `network/application/group`, so changing this has no effect today |
+| `commander.port` | integer | `0` | HTTP Commander port (0 = disabled, see [HTTP Commander](#http-commander)) |
+| `maxAccessories` | integer | `0` | Limit registered accessories (0 = unlimited). Debugging aid |
 | `allowBulkRemoval` | boolean | `false` | Allow one discovery pass to remove more than 20% of your accessories (see [Accessory Removal Safety](#accessory-removal-safety)) |
+
+If `cgate.host` or `cgate.project` is missing the platform logs an error and stops; nothing
+is discovered and nothing is removed.
 
 ### Group Override Fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `address` | string | *(required)* | C-Bus address: `network/application/group` (e.g., `254/56/3`) |
-| `type` | string | `"dimmer"` | Accessory type (see below) |
+| `type` | string | *(required)* | Accessory type (see [Accessory Types](#accessory-types)). An override without one is ignored |
 | `name` | string | *(auto-discovered)* | Custom display name for HomeKit |
-| `enabled` | boolean | `true` | Set `false` to hide from HomeKit |
-| `channel` | integer | — | Measurement channel for temperature sensors (app 228) |
-| `options` | object | — | Type-specific options (see below) |
+| `enabled` | boolean | `true` | `false` hides the group from HomeKit. Auto-created overrides start as `false` |
+| `channel` | integer | — | Measurement channel, required for temperature sensors (app 228) |
+| `options` | object | — | Type-specific options (see [below](#type-specific-options)) |
+
+Display names are sanitised for HomeKit: `[`, `]`, `(`, `)`, `:` and `/` are stripped and
+runs of spaces collapsed. A C-Bus tag of `Kitchen (Downlights)` becomes `Kitchen Downlights`.
+
+## What Gets Discovered
+
+Discovery reads the project database over `DBGETXML` and keeps only what it can meaningfully
+expose. A group is skipped — and so never written to your config — when:
+
+- it is outside the **lighting (56)** and **measurement (228)** applications;
+- its group address is **0 or 255** (master/broadcast);
+- its tag name is blank or a placeholder: `<unused>`, `unused`, `untitled`, `Group 12`,
+  `group_12`.
+
+Duplicate addresses in the XML are logged once and ignored.
+
+Groups with no physical unit behind them ("virtual" groups) answer `GET ... level` with a
+`401`. The plugin notices, marks them, and stops polling them; they still track SCP events
+normally.
 
 ## Accessory Types
 
 | Type | HomeKit Service | C-Bus Control | Description |
 |------|----------------|---------------|-------------|
-| `dimmer` | Lightbulb (On + Brightness) | RAMP | Dimmable light — the default for all discovered groups |
+| `dimmer` | Lightbulb (On + Brightness) | RAMP | Dimmable light — the default for a newly discovered lighting group |
 | `relay` | Lightbulb (On only) | ON/OFF | Non-dimmable light or relay |
 | `switch` | Switch (On) | ON/OFF | Generic switch with optional auto-off timer |
 | `fan` | Fan v2 (Active + Speed) | RAMP | Variable speed fan |
@@ -195,26 +271,40 @@ This will connect to C-Gate, discover all groups in the lighting application (ap
 | `contactSensor` | Contact Sensor | read-only | C-Bus contact/reed sensor |
 | `temperatureSensor` | Temperature Sensor | read-only | C-Bus Measurement App (228) temperature reading |
 
+C-Bus levels (0–255) and HomeKit percentages (0–100) are converted for you. Turning a dimmer
+on from HomeKit restores its last non-zero brightness rather than jumping to 100%.
+
+The sensor types read whatever the group reports: a lighting group at level > 0 means motion
+detected, or contact *open*. They are driven by SCP events and cannot be controlled from the
+Home app.
+
 ### Type-Specific Options
 
 **Dimmer:**
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `rampRate` | number | `0` | Default ramp duration in seconds |
+| `rampRate` | number | `0` | Ramp duration in seconds for on/brightness changes. `0` sends a plain `RAMP` with no rate |
 
 **Switch:**
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `autoOff` | number | `0` | Auto-off timer in seconds (0 = disabled) |
+| `autoOff` | number | `0` | Auto-off timer in seconds (0 = disabled). The timer lives in the plugin, so it does not survive a Homebridge restart |
 
 **Cover:**
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `travelTime` | number | `30` | Time in seconds for full open/close travel |
 
+C-Bus reports a cover's commanded level, not where the blind physically is, so the plugin
+animates `CurrentPosition` from `travelTime` to give the Home app something sensible to show
+while the blind moves. Set it to your blind's real travel time; it affects only the on-screen
+animation, never the C-Bus command.
+
 ## Temperature Sensors
 
-C-Bus temperature sensors use the Measurement Application (app 228) with device/channel addressing, rather than the group addressing used by lighting.
+C-Bus temperature sensors use the Measurement Application (app 228) with device/channel
+addressing, rather than the group addressing used by lighting. They are the one type that
+cannot be set up by ticking **Enabled** alone — you have to supply the channel.
 
 To configure a temperature sensor, you need:
 - The **device address** in the measurement application (e.g., `254/228/1`)
@@ -225,19 +315,43 @@ To configure a temperature sensor, you need:
     "address": "254/228/22",
     "type": "temperatureSensor",
     "name": "Kitchen Temperature",
-    "channel": 1
+    "channel": 1,
+    "enabled": true
 }
 ```
 
-A single C-Bus measurement device can have multiple channels (e.g., indoor temp on channel 1, outdoor temp on channel 5). Create separate overrides for each channel you want to expose.
+A single C-Bus measurement device can have multiple channels (e.g., indoor temp on channel 1,
+outdoor temp on channel 5). Create a separate override for each channel you want to expose;
+they share one address and are told apart by `channel`.
+
+Readings arrive only as C-Gate `measurement data` events on the SCP port — there is no
+equivalent of `GET level` to poll — so a newly added sensor shows `0°C` until the device next
+reports. Most report every few minutes.
+
+A measurement device that already has a channelled override is left alone by discovery — it
+will not be re-added as a separate disabled entry. An override of type `temperatureSensor`
+with no `channel` still registers, but nothing can ever update it, so the log warns and the
+reading stays at 0.
+
+If you upgraded from 1.0.4 or earlier you may have a leftover
+`{"address": "254/228/22", "type": "temperatureSensor", "enabled": false}` sitting beside your
+real sensor, added by the old behaviour. It is inert; delete it whenever convenient.
 
 ## HTTP Commander
 
-The optional HTTP Commander provides a web-based console for direct C-Gate command access and real-time event monitoring. Enable it by setting `commander.port` to a non-zero value (e.g., `8980`).
+The optional HTTP Commander provides a web-based console for direct C-Gate command access and
+real-time event monitoring. Enable it by setting `commander.port` to a non-zero value (e.g.,
+`8980`). It starts even when C-Gate is unreachable, so you can use it to diagnose an outage.
+
+> **Security:** the Commander has no authentication, accepts any C-Gate command, sends
+> `Access-Control-Allow-Origin: *`, and listens on **every** interface — not just localhost,
+> despite what the startup log line says. Anyone who can reach the port can operate your
+> lighting. Leave it disabled (`0`) in normal use, and never expose the port to the internet.
 
 ### Web Console
 
-Open `http://<homebridge-ip>:<port>/` in your browser for a terminal-style console where you can:
+Open `http://<homebridge-ip>:<port>/` (or `/console`) in your browser for a terminal-style
+console where you can:
 
 - Type and send any C-Gate command
 - See real-time SCP events (lighting changes, measurement data) as they happen
@@ -265,12 +379,17 @@ Response:
 }
 ```
 
+Errors return the same shape with `"status": "error"` and an `error` field: `400` for a
+missing `cmd`, `503` when C-Gate is not connected, `500` when the command itself fails or
+times out.
+
 **Event stream (SSE):**
 ```
 GET /events
 ```
 
-Returns a Server-Sent Events stream with real-time C-Gate events. Event types: `event` (event port), `scp` (status change port).
+Returns a Server-Sent Events stream with real-time C-Gate events. Event types: `event` (event
+port), `scp` (status change port). A keepalive comment is sent every 30 seconds.
 
 ```shell
 curl -N http://localhost:8980/events
@@ -285,10 +404,29 @@ curl -N http://localhost:8980/events
 
 ## How It Works
 
-1. **Discovery:** On startup, the plugin sends a `DBGETXML` command to C-Gate to retrieve the full project database, then parses the XML to find all groups in the lighting application (app 56)
-2. **Registration:** Each discovered group is registered as a HomeKit accessory. Group overrides let you change the device type, rename, or disable individual groups
-3. **Control:** When you control an accessory in HomeKit, the plugin sends the corresponding C-Gate command (ON, OFF, RAMP) via the command port (20023)
-4. **Real-time updates:** The plugin listens on the SCP port (20025) for state change notifications. When a light is turned on from a physical switch or another controller, HomeKit updates instantly
+1. **Discovery:** On the first successful connection the plugin sends `PROJECT USE` and
+   `PROJECT START`, then `DBGETXML` to retrieve the project database, and parses it for
+   groups in the lighting (56) and measurement (228) applications
+2. **Registration:** Groups you have enabled via a group override are registered as HomeKit
+   accessories; groups it has not seen before are appended to `config.json` disabled
+3. **Control:** Controlling an accessory in HomeKit sends the corresponding C-Gate command
+   (`ON`, `OFF`, `RAMP`) on the command port (20023)
+4. **Real-time updates:** The plugin listens on the SCP port (20025) for state changes. When a
+   light is switched from a wall plate or another controller, HomeKit updates instantly
+
+### When C-Gate Goes Away
+
+C-Gate being unreachable at startup and C-Gate disappearing an hour later are the same code
+path, and neither takes the bridge down:
+
+- The connection layer retries each of the three ports independently, backing off from 2s by
+  doubling to a 60s ceiling, with jitter so the ports do not all retry in lockstep
+- Accessories stay registered and simply stop responding while the link is down
+- Every successful reconnect resynchronises accessory state by re-reading each group's level.
+  A read that fails is skipped rather than treated as "off", so a partial resync never
+  switches your lights off in the Home app
+- Discovery runs once, on the first successful handshake. If it fails while C-Gate stays
+  connected — a project that has not finished loading, say — it retries every 60 seconds
 
 ## Accessory Removal Safety
 
@@ -306,7 +444,7 @@ gone":
 - **Discovery failures abort the pass.** If `PROJECT USE`/`PROJECT START` fails, the
   client is not ready, `DBGETXML` returns nothing, or the project XML fails to parse,
   discovery throws. Cached accessories are left registered untouched and the plugin
-  retries on the next restart.
+  retries.
 - **An empty result never removes anything.** If discovery returns zero devices while
   accessories are cached, removal is skipped and a warning is logged.
 - **Bulk removal requires opt-in.** A single pass will not remove more than 20% of the
@@ -336,6 +474,39 @@ defensive:
 - Overrides that are already present are skipped, so a retry cannot create duplicates,
   and a rewrite that loses platforms or accessories is refused outright.
 
+## Troubleshooting
+
+**No accessories in HomeKit after installing.** Expected on a first run — discovered groups
+are written to `config.json` disabled. See [First Run](#first-run).
+
+**A group is enabled but still missing.** Check the override has a `type` — one without it is
+ignored, and the log says `Ignoring group override`. Then check `maxAccessories` is not capping
+the list, and look for `Skipping duplicate address` or a placeholder name in
+[What Gets Discovered](#what-gets-discovered).
+
+**`Failed during device discovery` in the log.** C-Gate answered but the project database
+could not be read. Usually a wrong `project`, or C-Gate still loading. The plugin keeps your
+accessories and retries every 60 seconds — no action needed beyond fixing the name.
+
+**`Refusing to remove N of M cached accessories`.** A safety net, not a failure. Check
+`cgate.host` and `cgate.project` first; only set `allowBulkRemoval` if you really did
+decommission that many groups.
+
+**Accessories show as "No Response".** The C-Gate link is down. The log shows
+`C-Gate connection lost` and the plugin reconnects on its own; check the C-Gate host, the
+three ports, and `access-control.txt`.
+
+**A temperature sensor reads 0°C.** It has not reported yet, or `channel` is missing or wrong.
+A missing one is logged as `has no "channel" — it will register but never report a reading`.
+To find the right value, enable the [HTTP Commander](#http-commander) and watch `/events` for
+`measurement data` lines, which carry the device and channel numbers actually being broadcast.
+
+**`Commander port N is already in use`.** Another process has the port; pick a different one.
+The rest of the plugin is unaffected.
+
+**Levels look right in C-Bus but wrong in the Home app.** Brightness is rounded through
+0–255 ↔ 0–100 conversion, so 1% steps will not always round-trip exactly.
+
 ## Development
 
 ```shell
@@ -349,6 +520,12 @@ npm install
 # Build
 npm run build
 
+# Lint
+npm run lint
+
+# Test
+npm test
+
 # Link for development
 npm link
 
@@ -356,7 +533,18 @@ npm link
 npm run watch
 ```
 
-Configure your development instance in `test/hbConfig/config.json`.
+Configure your development instance in `test/hbConfig/config.json` (used by `npm run watch`;
+unrelated to the test suite).
+
+### Tests
+
+`npm test` compiles `src` and `tests` together and runs the recovery suite with the Node
+built-in test runner. The tests drive a real TCP fake C-Gate on all three ports rather than a
+mock, because every bug they exist to catch is a socket lifecycle bug — so the suite takes
+about 30 seconds, most of it waiting out genuine reconnect backoff. See
+[`tests/README.md`](tests/README.md) for the helpers and how to check a test is load-bearing.
+
+CI runs lint, build and tests on Node 20, 22 and 24 for every push and pull request.
 
 ### Versioning
 
@@ -374,6 +562,9 @@ npm version patch
 ```
 
 ### Publishing
+
+`prepublishOnly` runs lint, build and the test suite, so a publish fails rather than shipping
+a broken build.
 
 ```shell
 npm publish

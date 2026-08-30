@@ -3,10 +3,13 @@
   "pluginType": "platform",
   "singular": true,
   "strictValidation": false,
-  "headerDisplay": "Connect your Clipsal/Schneider Electric C-Bus lighting network to Apple HomeKit via C-Gate.",
+  "headerDisplay": "Connect your Clipsal/Schneider Electric C-Bus lighting network to Apple HomeKit via C-Gate.\n\n**First run:** set the C-Gate host and project, then restart. The plugin discovers every named group in your project and adds it below as a **disabled** override — nothing reaches HomeKit until you tick **Enabled** on the groups you want and restart again.",
   "schema": {
     "type": "object",
-    "required": ["name", "cgate"],
+    "required": [
+      "name",
+      "cgate"
+    ],
     "properties": {
       "name": {
         "title": "Platform Name",
@@ -16,7 +19,10 @@
       "cgate": {
         "title": "C-Gate Connection",
         "type": "object",
-        "required": ["host", "project"],
+        "required": [
+          "host",
+          "project"
+        ],
         "properties": {
           "host": {
             "title": "C-Gate Host",
@@ -51,7 +57,7 @@
             "title": "Default Network",
             "type": "integer",
             "default": 254,
-            "description": "Default C-Bus network number."
+            "description": "Reserved. Networks are taken from the discovered address or from an override's own network/application/group, so this currently has no effect."
           }
         }
       },
@@ -78,7 +84,7 @@
             "default": 0,
             "minimum": 0,
             "maximum": 65535,
-            "description": "HTTP port for C-Gate command console (0 = disabled)."
+            "description": "HTTP port for the C-Gate command console (0 = disabled). The console has no authentication and listens on every interface, so anyone who can reach the port can operate your lighting. Leave it at 0 unless you are debugging, and never expose it to the internet."
           }
         }
       },
@@ -98,15 +104,57 @@
               "title": "Device Type",
               "type": "string",
               "oneOf": [
-                { "title": "Dimmer Light", "enum": ["dimmer"] },
-                { "title": "Relay Light (On/Off)", "enum": ["relay"] },
-                { "title": "Switch", "enum": ["switch"] },
-                { "title": "Fan", "enum": ["fan"] },
-                { "title": "Cover/Shutter", "enum": ["cover"] },
-                { "title": "Motion Sensor", "enum": ["motionSensor"] },
-                { "title": "Contact Sensor", "enum": ["contactSensor"] },
-                { "title": "Temperature Sensor", "enum": ["temperatureSensor"] }
-              ]
+                {
+                  "title": "Dimmer Light",
+                  "enum": [
+                    "dimmer"
+                  ]
+                },
+                {
+                  "title": "Relay Light (On/Off)",
+                  "enum": [
+                    "relay"
+                  ]
+                },
+                {
+                  "title": "Switch",
+                  "enum": [
+                    "switch"
+                  ]
+                },
+                {
+                  "title": "Fan",
+                  "enum": [
+                    "fan"
+                  ]
+                },
+                {
+                  "title": "Cover/Shutter",
+                  "enum": [
+                    "cover"
+                  ]
+                },
+                {
+                  "title": "Motion Sensor",
+                  "enum": [
+                    "motionSensor"
+                  ]
+                },
+                {
+                  "title": "Contact Sensor",
+                  "enum": [
+                    "contactSensor"
+                  ]
+                },
+                {
+                  "title": "Temperature Sensor",
+                  "enum": [
+                    "temperatureSensor"
+                  ]
+                }
+              ],
+              "default": "dimmer",
+              "description": "Required. How this group is exposed to HomeKit."
             },
             "name": {
               "title": "Custom Name",
@@ -117,12 +165,12 @@
               "title": "Enabled",
               "type": "boolean",
               "default": true,
-              "description": "Set to false to hide this group from HomeKit."
+              "description": "Untick to hide this group from HomeKit. Newly discovered groups start disabled."
             },
             "channel": {
               "title": "Measurement Channel",
               "type": "integer",
-              "description": "Channel number for temperature sensors (app 228)."
+              "description": "Required for temperature sensors (app 228). The measurement channel on the device, e.g. 1. Add one entry per channel you want to expose."
             },
             "options": {
               "title": "Type-Specific Options",
@@ -147,13 +195,20 @@
                 }
               }
             }
-          }
-        }
+          },
+          "required": [
+            "address",
+            "type"
+          ]
+        },
+        "description": "One entry per C-Bus group. The plugin fills these in for you as it discovers groups; tick Enabled on the ones you want in HomeKit. Device Type is required — an entry without one is ignored."
       }
     }
   },
   "layout": [
-    { "key": "name" },
+    {
+      "key": "name"
+    },
     {
       "type": "fieldset",
       "title": "C-Gate Connection",
@@ -161,17 +216,29 @@
         "cgate.host",
         "cgate.project",
         "cgate.network",
-        { "key": "cgate.commandPort", "type": "number" },
-        { "key": "cgate.eventPort", "type": "number" },
-        { "key": "cgate.scpPort", "type": "number" }
+        {
+          "key": "cgate.commandPort",
+          "type": "number"
+        },
+        {
+          "key": "cgate.eventPort",
+          "type": "number"
+        },
+        {
+          "key": "cgate.scpPort",
+          "type": "number"
+        }
       ]
     },
     {
       "type": "fieldset",
       "title": "HTTP Commander",
-      "description": "Optional web console for direct C-Gate command access.",
+      "description": "Optional web console for direct C-Gate command access. Unauthenticated — leave disabled (0) unless you are debugging.",
       "items": [
-        { "key": "commander.port", "type": "number" }
+        {
+          "key": "commander.port",
+          "type": "number"
+        }
       ]
     },
     {
@@ -181,19 +248,24 @@
       "expanded": false,
       "items": [
         "allowBulkRemoval",
-        { "key": "maxAccessories", "type": "number" }
+        {
+          "key": "maxAccessories",
+          "type": "number"
+        }
       ]
     },
     {
       "key": "groupOverrides",
       "type": "array",
       "title": "Group Type Overrides",
-      "description": "Override the default device type for specific C-Bus groups.",
+      "description": "Discovered groups appear here automatically, disabled. Tick Enabled and pick the right Device Type, then restart Homebridge.",
       "buttonText": "Add Override",
       "items": [
         "groupOverrides[].address",
         "groupOverrides[].type",
         "groupOverrides[].name",
+        "groupOverrides[].enabled",
+        "groupOverrides[].channel",
         "groupOverrides[].options.travelTime",
         "groupOverrides[].options.autoOff",
         "groupOverrides[].options.rampRate"

@@ -36,6 +36,7 @@ Show your Homebridge config.json here, remove any sensitive information.
 **Environment:**
 
 * **Plugin Version**:
+* **C-Gate Version**: <!-- e.g. 2.11.7 -->
 * **Homebridge Version**: <!-- homebridge -V -->
 * **Node.js Version**: <!-- node -v -->
 * **NPM Version**: <!-- npm -v -->
