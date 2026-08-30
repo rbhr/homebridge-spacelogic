@@ -119,9 +119,9 @@ Groups added to your C-Bus project later get appended as new disabled overrides 
 restart, so the same tick-and-restart applies. Entries already in the file are never
 duplicated and never re-enabled behind your back.
 
-> **`type` is required on every override.** An entry without a `type` is ignored entirely —
-> including its `enabled: true` — and the group will not appear in HomeKit. The overrides the
-> plugin writes for you always include one; keep it if you hand-edit.
+> **Hand-editing?** `type` is optional — leave it out and the group is treated as a dimmer,
+> or as a temperature sensor if it is on the measurement application (228). `address` is the
+> only field an override genuinely needs.
 
 ### Full Config
 
@@ -233,7 +233,7 @@ is discovered and nothing is removed.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `address` | string | *(required)* | C-Bus address: `network/application/group` (e.g., `254/56/3`) |
-| `type` | string | *(required)* | Accessory type (see [Accessory Types](#accessory-types)). An override without one is ignored |
+| `type` | string | `"dimmer"` | Accessory type (see [Accessory Types](#accessory-types)). Defaults to `temperatureSensor` on application 228 |
 | `name` | string | *(auto-discovered)* | Custom display name for HomeKit |
 | `enabled` | boolean | `true` | `false` hides the group from HomeKit. Auto-created overrides start as `false` |
 | `channel` | integer | — | Measurement channel, required for temperature sensors (app 228) |
@@ -479,10 +479,10 @@ defensive:
 **No accessories in HomeKit after installing.** Expected on a first run — discovered groups
 are written to `config.json` disabled. See [First Run](#first-run).
 
-**A group is enabled but still missing.** Check the override has a `type` — one without it is
-ignored, and the log says `Ignoring group override`. Then check `maxAccessories` is not capping
-the list, and look for `Skipping duplicate address` or a placeholder name in
-[What Gets Discovered](#what-gets-discovered).
+**A group is enabled but still missing.** Check `maxAccessories` is not capping the list, then
+look for `Skipping duplicate address` or a placeholder name in
+[What Gets Discovered](#what-gets-discovered). An override with no `address` is ignored and
+logged as `Ignoring group override with no address`.
 
 **`Failed during device discovery` in the log.** C-Gate answered but the project database
 could not be read. Usually a wrong `project`, or C-Gate still loading. The plugin keeps your

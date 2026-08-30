@@ -29,6 +29,20 @@ import { HttpCommander } from './commander/HttpCommander.js';
 /** How long to wait before re-attempting a discovery that failed while C-Gate stayed connected. */
 const DISCOVERY_RETRY_DELAY = 60_000;
 
+/** The application number out of a "network/application/group" address. */
+function applicationOf(address: string): number {
+  return parseInt(address.split('/')[1], 10);
+}
+
+/**
+ * The type to assume for a group nobody has typed by hand: what discovery gives
+ * an address it has just found, and the fallback for an override that omits
+ * one. Measurement devices are temperature sensors; everything else dims.
+ */
+function defaultTypeForApplication(application: number): CBusDeviceType {
+  return application === CBUS_MEASUREMENT_APPLICATION ? 'temperatureSensor' : 'dimmer';
+}
+
 /**
  * The configured group overrides, split by how the thing they describe is
  * addressed. See {@link SpaceLogicPlatform.getGroupOverrides}.
@@ -283,7 +297,7 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
         this.log.info(`New device discovered: ${device.addressString} (${device.name}) — adding as disabled override`);
         newOverrides.push({
           address: device.addressString,
-          type: device.address.application === CBUS_MEASUREMENT_APPLICATION ? 'temperatureSensor' : 'dimmer',
+          type: defaultTypeForApplication(device.address.application),
           name: device.name,
           enabled: false,
         });
@@ -551,35 +565,44 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
     }
 
     for (const override of overrides) {
-      if (!override.address || !override.type) {
-        this.log.warn(
-          `Ignoring group override ${JSON.stringify(override)}: both "address" and "type" are required.`,
-        );
+      if (!override.address) {
+        this.log.warn(`Ignoring group override with no address: ${JSON.stringify(override)}`);
         continue;
+      }
+
+      // An override that omits "type" is not a broken override, it is the
+      // shorthand the schema has always advertised. Dropping it made the group
+      // disappear from HomeKit with nothing in the log to explain it, which
+      // looks exactly like the group having gone from C-Bus.
+      const resolved: GroupOverride = override.type
+        ? override
+        : { ...override, type: defaultTypeForApplication(applicationOf(override.address)) };
+      if (!override.type) {
+        this.log.debug(`Group override ${resolved.address} has no type; using ${resolved.type}`);
       }
 
       // Recorded even for the channelled sensors below, so discovery can tell
       // "this address is configured" from "this address is new".
-      addresses.add(override.address);
+      addresses.add(resolved.address);
 
-      if (override.type === 'temperatureSensor') {
-        if (override.channel !== undefined) {
-          temperatureSensors.push(override);
+      if (resolved.type === 'temperatureSensor') {
+        if (resolved.channel !== undefined) {
+          temperatureSensors.push(resolved);
           continue;
         }
-        if (override.enabled !== false) {
+        if (resolved.enabled !== false) {
           // Measurement events are routed by channel, so there is nothing to
           // deliver a reading to. Register it anyway rather than silently
           // dropping an accessory somebody already has in HomeKit, but say why
           // it never leaves 0.
           this.log.warn(
-            `Temperature sensor ${override.address} has no "channel" — it will register but never report `
+            `Temperature sensor ${resolved.address} has no "channel" — it will register but never report `
             + 'a reading. Add the measurement channel to the override.',
           );
         }
       }
 
-      byAddress.set(override.address, override);
+      byAddress.set(resolved.address, resolved);
     }
 
     return { byAddress, temperatureSensors, addresses };

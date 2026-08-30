@@ -153,7 +153,9 @@ describe('discovery and group overrides', () => {
     }
   });
 
-  it('ignores an override with no type and says so', async () => {
+  it('defaults a lighting override with no type to a dimmer', async () => {
+    // Dropping these made the group vanish from HomeKit with nothing in the log,
+    // which is indistinguishable from it having gone from C-Bus.
     const server = await FakeCGate.create({ xml: MIXED_XML });
     const harness = makePlatform(server, [
       { address: '254/56/1', name: 'Kitchen', enabled: true },
@@ -161,12 +163,53 @@ describe('discovery and group overrides', () => {
 
     try {
       harness.start();
+      await waitFor(() => harness.api.registered.length > 0, 15_000, 'the untyped group to register');
+
+      const accessory = harness.api.registered[0];
+      assert.equal(accessory.displayName, 'Kitchen');
+      const shape = accessory as unknown as { getService(target: unknown): Service | undefined };
+      assert.ok(shape.getService(Service.Lightbulb), 'expected a Lightbulb, the dimmer service');
+    } finally {
+      harness.stop();
+      await server.stop();
+    }
+  });
+
+  it('defaults an untyped measurement address to a temperature sensor', async () => {
+    const server = await FakeCGate.create({ xml: MIXED_XML });
+    const harness = makePlatform(server, [
+      { address: '254/228/22', name: 'Sensor Unit', enabled: true },
+    ]);
+
+    try {
+      harness.start();
+      // No channel, so it registers but can never be updated — and says so.
       await waitFor(
-        () => harness.log.lines.some((line) => line.includes('Ignoring group override')),
+        () => harness.log.lines.some((line) => line.includes('has no "channel"')),
         15_000,
-        'the malformed override to be reported',
+        'the channel-less sensor to be reported',
       );
-      assert.equal(harness.api.registered.length, 0, 'a typeless override must not register an accessory');
+
+      const accessory = harness.api.registered[0];
+      const shape = accessory as unknown as { getService(target: unknown): Service | undefined };
+      assert.ok(shape.getService(Service.TemperatureSensor), 'app 228 should default to a temperature sensor');
+    } finally {
+      harness.stop();
+      await server.stop();
+    }
+  });
+
+  it('ignores an override with no address at all', async () => {
+    const server = await FakeCGate.create({ xml: MIXED_XML });
+    const harness = makePlatform(server, [{ name: 'Nowhere', enabled: true }]);
+
+    try {
+      harness.start();
+      await waitFor(
+        () => harness.log.lines.some((line) => line.includes('Ignoring group override with no address')),
+        15_000,
+        'the addressless override to be reported',
+      );
     } finally {
       harness.stop();
       await server.stop();

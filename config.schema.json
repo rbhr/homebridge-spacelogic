@@ -154,7 +154,7 @@
                 }
               ],
               "default": "dimmer",
-              "description": "Required. How this group is exposed to HomeKit."
+              "description": "How this group is exposed to HomeKit. Defaults to Dimmer Light, or Temperature Sensor for a measurement device (application 228)."
             },
             "name": {
               "title": "Custom Name",
@@ -197,11 +197,10 @@
             }
           },
           "required": [
-            "address",
-            "type"
+            "address"
           ]
         },
-        "description": "One entry per C-Bus group. The plugin fills these in for you as it discovers groups; tick Enabled on the ones you want in HomeKit. Device Type is required — an entry without one is ignored."
+        "description": "One entry per C-Bus group. The plugin fills these in for you as it discovers groups; tick Enabled on the ones you want in HomeKit and set the right Device Type."
       }
     }
   },
