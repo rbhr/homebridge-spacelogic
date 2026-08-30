@@ -29,6 +29,19 @@ import { HttpCommander } from './commander/HttpCommander.js';
 /** How long to wait before re-attempting a discovery that failed while C-Gate stayed connected. */
 const DISCOVERY_RETRY_DELAY = 60_000;
 
+/**
+ * The configured group overrides, split by how the thing they describe is
+ * addressed. See {@link SpaceLogicPlatform.getGroupOverrides}.
+ */
+interface ResolvedOverrides {
+  /** Overrides for ordinary groups, keyed by "network/application/group". */
+  byAddress: Map<string, GroupOverride>;
+  /** Temperature sensor overrides, which are addressed by device *and* channel. */
+  temperatureSensors: GroupOverride[];
+  /** Every address named by any override, channelled temperature sensors included. */
+  addresses: Set<string>;
+}
+
 export class SpaceLogicPlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service;
   public readonly Characteristic: typeof Characteristic;
@@ -254,10 +267,19 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
       }
       seenAddresses.add(device.addressString);
 
-      const override = overrides.get(device.addressString);
+      const override = overrides.byAddress.get(device.addressString);
 
       // Devices without a group override — create a disabled override in config
       if (!override) {
+        // A measurement device configured only as channelled temperature sensors
+        // has no override under its bare address, but it is not unseen:
+        // registerTemperatureSensors owns it. Without this it would be re-added
+        // to config.json as a new disabled group on every fresh install.
+        if (overrides.addresses.has(device.addressString)) {
+          this.log.debug(`Skipping ${device.addressString}: configured as a channelled temperature sensor`);
+          continue;
+        }
+
         this.log.info(`New device discovered: ${device.addressString} (${device.name}) — adding as disabled override`);
         newOverrides.push({
           address: device.addressString,
@@ -274,7 +296,7 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
         continue;
       }
 
-      const deviceType = this.resolveDeviceType(device, overrides);
+      const deviceType = override.type;
       const displayName = this.sanitiseDisplayName(override.name || device.name);
 
       this.registerDevice(cgateConfig, device, deviceType, displayName, override, newAccessories);
@@ -283,7 +305,7 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
     }
 
     // Register temperature sensor overrides (channel-based, not auto-discovered)
-    this.registerTemperatureSensors(cgateConfig, overrides, newAccessories, maxAccessories, count);
+    this.registerTemperatureSensors(cgateConfig, overrides.temperatureSensors, newAccessories, maxAccessories, count);
 
     // Persist any newly discovered devices as disabled overrides in config.json
     if (newOverrides.length > 0) {
@@ -419,20 +441,24 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
     this.discoveredUUIDs.push(uuid);
   }
 
+  /**
+   * Register the channelled temperature sensor overrides.
+   *
+   * These are not driven by discovery: one measurement device carries several
+   * channels, so the address alone does not identify an accessory and the
+   * project database says nothing about which channels are in use. The user
+   * names them, one override per channel.
+   */
   private registerTemperatureSensors(
     cgateConfig: CGateConfig,
-    overrides: Map<string, GroupOverride>,
+    temperatureSensors: GroupOverride[],
     newAccessories: PlatformAccessory[],
     maxAccessories: number,
     startCount: number,
   ): void {
     let count = startCount;
 
-    // Find all temperature sensor overrides with channels
-    for (const [address, override] of overrides) {
-      if (override.type !== 'temperatureSensor' || override.channel === undefined) {
-        continue;
-      }
+    for (const override of temperatureSensors) {
       if (override.enabled === false) {
         continue;
       }
@@ -441,17 +467,19 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
         break;
       }
 
-      const parts = address.split('/');
+      const parts = override.address.split('/');
       const network = parseInt(parts[0], 10);
       const application = parseInt(parts[1], 10);
       const deviceId = parseInt(parts[2], 10);
+      // Measurement events are routed by device *and* channel, so that is what
+      // identifies the handler. The accessory still carries the plain address.
       const handlerKey = `${network}/${application}/${deviceId}/${override.channel}`;
       const displayName = this.sanitiseDisplayName(override.name || `Temp ${handlerKey}`);
 
       const device: CBusDevice = {
         address: { network, application, group: deviceId },
         name: override.name || `Temp ${handlerKey}`,
-        addressString: address,
+        addressString: override.address,
       };
 
       this.registerDevice(cgateConfig, device, 'temperatureSensor', displayName, override, newAccessories, handlerKey, override.channel);
@@ -502,36 +530,59 @@ export class SpaceLogicPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  private resolveDeviceType(device: CBusDevice, overrides: Map<string, GroupOverride>): CBusDeviceType {
-    const override = overrides.get(device.addressString);
-    if (override) {
-      return override.type;
-    }
+  /**
+   * Read the configured group overrides, split by how they are addressed.
+   *
+   * Ordinary groups are identified by their address alone. Channelled
+   * temperature sensors are not — one measurement device carries several, so
+   * the address does not identify an accessory and two overrides can share it.
+   * Holding both in a single map keyed two different ways meant a discovered
+   * measurement device never matched its own override, and got re-added to
+   * config.json as a new disabled group.
+   */
+  private getGroupOverrides(): ResolvedOverrides {
+    const byAddress = new Map<string, GroupOverride>();
+    const temperatureSensors: GroupOverride[] = [];
+    const addresses = new Set<string>();
 
-    if (device.address.application === CBUS_MEASUREMENT_APPLICATION) {
-      return 'temperatureSensor';
-    }
-    return 'dimmer';
-  }
-
-  private getGroupOverrides(): Map<string, GroupOverride> {
-    const map = new Map<string, GroupOverride>();
     const overrides = this.config.groupOverrides as GroupOverride[] | undefined;
     if (!overrides || !Array.isArray(overrides)) {
-      return map;
+      return { byAddress, temperatureSensors, addresses };
     }
+
     for (const override of overrides) {
-      if (override.address && override.type) {
-        // Temperature sensors with channels use address/channel as key for uniqueness
-        // but are also stored under their base address for the registerTemperatureSensors method
-        if (override.type === 'temperatureSensor' && override.channel !== undefined) {
-          map.set(`${override.address}/${override.channel}`, override);
-        } else {
-          map.set(override.address, override);
+      if (!override.address || !override.type) {
+        this.log.warn(
+          `Ignoring group override ${JSON.stringify(override)}: both "address" and "type" are required.`,
+        );
+        continue;
+      }
+
+      // Recorded even for the channelled sensors below, so discovery can tell
+      // "this address is configured" from "this address is new".
+      addresses.add(override.address);
+
+      if (override.type === 'temperatureSensor') {
+        if (override.channel !== undefined) {
+          temperatureSensors.push(override);
+          continue;
+        }
+        if (override.enabled !== false) {
+          // Measurement events are routed by channel, so there is nothing to
+          // deliver a reading to. Register it anyway rather than silently
+          // dropping an accessory somebody already has in HomeKit, but say why
+          // it never leaves 0.
+          this.log.warn(
+            `Temperature sensor ${override.address} has no "channel" — it will register but never report `
+            + 'a reading. Add the measurement channel to the override.',
+          );
         }
       }
+
+      byAddress.set(override.address, override);
     }
-    return map;
+
+    return { byAddress, temperatureSensors, addresses };
   }
 
   /**
