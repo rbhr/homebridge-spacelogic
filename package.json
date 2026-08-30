@@ -37,8 +37,7 @@
     "watch": "npm run build && npm link && nodemon"
   },
   "dependencies": {
-    "fast-xml-parser": "^5.2.3",
-    "homebridge-lib": "^7.1.12"
+    "fast-xml-parser": "^5.2.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
