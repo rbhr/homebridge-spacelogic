@@ -563,18 +563,24 @@ npm version patch
 
 ### Publishing
 
-`prepublishOnly` runs lint, build and the test suite, so a publish fails rather than shipping
-a broken build.
+Releases go out from GitHub Actions, not from a laptop. `.github/workflows/publish.yml` uses
+npm's trusted publishing: GitHub mints an OIDC token, npm exchanges it for a short-lived
+credential, and publishes. There is no `NPM_TOKEN` stored anywhere and no 2FA prompt, and npm
+attaches a provenance attestation showing which commit and workflow run produced the tarball.
+
+Publishing a release is therefore just tagging one:
 
 ```shell
-npm publish
+npm version patch          # or minor / major — commits and tags
+git push && git push --follow-tags
 ```
 
-To publish a beta:
+The workflow refuses to publish if the tag and `package.json` disagree, and derives the
+dist-tag from the version, so a prerelease can never take `latest`:
 
 ```shell
-npm version prepatch --preid beta
-npm publish --tag beta
+npm version prepatch --preid beta   # 1.0.6-beta.0 -> published under "beta"
+git push && git push --follow-tags
 ```
 
 Users install betas with:
@@ -582,6 +588,16 @@ Users install betas with:
 ```shell
 sudo npm install -g homebridge-spacelogic@beta
 ```
+
+`npm publish` still works locally if you need it — `prepublishOnly` runs lint, build and the
+test suite either way, so a publish fails rather than shipping a broken build — but it will ask
+for 2FA, and the tarball gets no provenance.
+
+**One-time setup on npmjs.com,** without which the workflow cannot authenticate: on the
+package's *Settings* page, under **Publishing access**, add a trusted publisher — GitHub
+Actions, organisation `rbhr`, repository `homebridge-spacelogic`, workflow file
+`publish.yml`. The workflow filename is part of the trust, so renaming the file breaks
+publishing until the setting is updated to match.
 
 ## License
 

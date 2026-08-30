@@ -1,0 +1,77 @@
+name: Publish to npm
+
+# Publishing happens here, not from a laptop. npm's trusted publishing exchanges
+# GitHub's OIDC token for a short-lived credential, so there is no NPM_TOKEN to
+# leak and no 2FA prompt to answer — but it only works when the run matches the
+# trusted publisher configured on npmjs.com: this repository, this filename.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'npm dist-tag to publish under'
+        required: false
+        default: 'latest'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write # required for OIDC; without it npm falls back to asking for a token
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing landed in npm 11.5.1. setup-node ships whatever npm
+      # came with the Node build, which may be older than that.
+      - name: Ensure npm supports trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Work out what is being published
+        id: release
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+
+          # A tag that disagrees with package.json is how a version ends up on
+          # npm with no tag pointing at it, so refuse rather than guess.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$pkg" ]; then
+              echo "Tag $GITHUB_REF_NAME does not match package.json version $pkg." >&2
+              exit 1
+            fi
+          fi
+
+          # A prerelease must never take the latest dist-tag: npm installs
+          # latest by default, so that would hand every user a beta.
+          if [ -n "${{ inputs.tag }}" ]; then
+            dist="${{ inputs.tag }}"
+          elif case "$pkg" in *-*) true;; *) false;; esac; then
+            dist=beta
+          else
+            dist=latest
+          fi
+
+          echo "version=$pkg" >> "$GITHUB_OUTPUT"
+          echo "dist=$dist" >> "$GITHUB_OUTPUT"
+          echo "Publishing $pkg under the $dist tag."
+
+      # npm publish runs prepublishOnly, which lints, builds and runs the tests.
+      - name: Publish
+        run: npm publish --tag "${{ steps.release.outputs.dist }}"
+
+      - name: Summarise
+        run: |
+          echo "Published \`homebridge-spacelogic@${{ steps.release.outputs.version }}\` under \`${{ steps.release.outputs.dist }}\`." >> "$GITHUB_STEP_SUMMARY"
