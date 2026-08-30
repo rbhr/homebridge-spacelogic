@@ -16,6 +16,7 @@ import {
   COMMAND_TIMEOUT,
   DBGETXML_TIMEOUT,
   DEFAULT_KEEPALIVE_INTERVAL,
+  CBUS_LEVEL_MAX,
 } from './types.js';
 
 const SCP_LIGHTING_PATTERN = /^lighting\s+(on|off|ramp)\s+\/\/(\S+?)\/(\d+)\/(\d+)\/(\d+)(?:\s+(\d+)%?)?/;
@@ -434,7 +435,13 @@ export class CGateClient extends EventEmitter {
         network: parseInt(lightMatch[3], 10),
         application: parseInt(lightMatch[4], 10),
         group: parseInt(lightMatch[5], 10),
-        level: action === 'on' ? 100 : action === 'off' ? 0 : lightMatch[6] ? parseInt(lightMatch[6], 10) : undefined,
+        // All three actions report on the native 0-255 scale. "on" and "off"
+        // carry no level of their own, so they are normalised to the endpoints.
+        level: action === 'on'
+          ? CBUS_LEVEL_MAX
+          : action === 'off'
+            ? 0
+            : lightMatch[6] ? parseInt(lightMatch[6], 10) : undefined,
       };
       return event;
     }

@@ -34,7 +34,7 @@ export class FanAccessory extends BaseAccessory {
     } else {
       this.active = true;
       if (event.level !== undefined && event.level > 0) {
-        this.speed = event.level;
+        this.speed = this.levelToBrightness(event.level);
       }
     }
     this.device.lastLevel = this.active ? this.brightnessToLevel(this.speed) : 0;

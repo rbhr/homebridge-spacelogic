@@ -1,8 +1,12 @@
 # Tests
 
-Recovery tests for the C-Gate connection layer, run with the Node built-in test
-runner. `npm test` compiles `src` and `tests` together to `build-tests/` and runs
-everything in `build-tests/tests/`.
+Run with the Node built-in test runner. `npm test` compiles `src` and `tests`
+together to `build-tests/` and runs everything in `build-tests/tests/`.
+
+- `platform-recovery.test.ts` — the C-Gate connection layer surviving an outage.
+- `platform-discovery.test.ts` — discovery and how group overrides are read.
+- `scp-levels.test.ts` — the 0-255/0-100 boundary between C-Bus and HomeKit.
+- `cgate-client.test.ts`, `cgate-connection.test.ts` — the protocol layer.
 
 ## Why these use real sockets
 
@@ -34,6 +38,11 @@ touches, backed by the genuine `hap-nodejs` `Service` and `Characteristic`
 classes. Stubs would accept anything and let a broken resync pass, so the tests
 assert on real characteristic values. `writeTempConfig()` gives each test a
 throwaway `config.json`, because discovery appends newly found groups to it.
+
+One consequence worth knowing when writing level assertions: `hap-nodejs`
+*clamps* an out-of-range update after warning about it, so a brightness of 128
+reads back as a legal 100. Asserting a value is within range therefore proves
+nothing — assert the exact expected number.
 
 ## Verifying a test is load-bearing
 

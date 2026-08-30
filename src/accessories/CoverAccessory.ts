@@ -46,7 +46,7 @@ export class CoverAccessory extends BaseAccessory {
     } else if (event.action === 'off') {
       newTarget = 0;
     } else if (event.level !== undefined) {
-      newTarget = event.level;
+      newTarget = this.levelToBrightness(event.level);
     } else {
       return;
     }

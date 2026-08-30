@@ -63,6 +63,11 @@ export interface ScpLightingEvent {
   network: number;
   application: number;
   group: number;
+  /**
+   * Native C-Bus level, 0-255 — the same scale as RAMP and "GET ... level",
+   * never a percentage. C-Gate reports a ramp in native units, so anything
+   * that converted this as though it were 0-100 would fold the ratio in twice.
+   */
   level?: number;
 }
 

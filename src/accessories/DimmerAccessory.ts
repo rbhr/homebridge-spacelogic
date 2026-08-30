@@ -31,13 +31,15 @@ export class DimmerAccessory extends BaseAccessory {
   }
 
   handleLightingEvent(event: ScpLightingEvent): void {
-    // SCP reports level as 0-100 percentage for ramp events
+    // The event level is already native 0-255, the same units as this.level.
+    // Passing it through brightnessToLevel scaled it a second time, so a ramp
+    // to 50% came back as 128 -> 326 and HomeKit rejected the 128% brightness
+    // that produced, snapping the slider to 100.
     if (event.level !== undefined) {
-      this.level = this.brightnessToLevel(event.level);
-    } else if (event.action === 'on') {
-      this.level = 255;
-    } else if (event.action === 'off') {
-      this.level = 0;
+      this.level = event.level;
+    } else if (event.action === 'ramp') {
+      // A ramp whose level C-Gate did not report tells us nothing.
+      return;
     }
 
     if (this.level > 0) {
