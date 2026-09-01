@@ -29,7 +29,7 @@ A [Homebridge](https://homebridge.io) dynamic platform plugin for **Clipsal/Schn
 - **Temperature sensors** — supports C-Bus Measurement Application (app 228) with multi-channel devices
 - **Outage recovery** — reconnects with backoff and resynchronises state when C-Gate or the network goes away, rather than dying and needing a manual restart
 - **Safe by default** — a failed or suspiciously empty discovery never deletes your HomeKit accessories (see [Accessory Removal Safety](#accessory-removal-safety))
-- **HTTP Commander** — optional built-in web console for direct C-Gate command access with real-time event streaming
+- **HTTP Commander** — optional built-in web console for direct C-Gate command access, real-time event streaming, and a one-click tag database download
 - **Config UI support** — full settings UI via [homebridge-config-ui-x](https://github.com/homebridge/homebridge-config-ui-x)
 - **Homebridge 2.0** compatible (also works with Homebridge v1.8+)
 - **One runtime dependency** — `fast-xml-parser`, for the C-Gate project database
@@ -357,6 +357,29 @@ console where you can:
 - See real-time SCP events (lighting changes, measurement data) as they happen
 - Monitor event port activity
 - Debug C-Bus communication
+- **Download the project's tag database** as XML, from the button in the header
+
+### Downloading the tag database
+
+**Download &lt;project&gt;.xml** in the console header fetches the whole tag database over
+`DBGETXML` and saves it. It is the same document the plugin parses to discover groups, so it
+is also the file to attach to a bug report about discovery.
+
+This is deliberately **not** the `.cbz` that the [C-Gate Server add-on][addon] offers, and it
+cannot be. A `.cbz` is a zip of the project *directory* — the database plus the dynamic
+labelling bitmaps C-Bus Toolkit needs — and those files live on the C-Gate host, which is
+usually not the machine running Homebridge. This plugin is a C-Gate *client*, so what it can
+retrieve is what C-Gate serves over the command interface. For a Toolkit-restorable backup,
+use the add-on's console, or Toolkit itself.
+
+C-Gate answers `DBGETXML` from the database it holds in memory, so no `project save` is
+needed first — unlike a file-level backup, this is always the live state.
+
+The button follows the connection: it is disabled while C-Gate is unreachable, a failed
+fetch is reported in the log rather than replacing the console with a page of JSON, and an
+empty response (a project that is not loaded) is an error rather than a 0-byte file.
+
+[addon]: https://github.com/rbhr/ha-app-C-Gate-Server
 
 ### HTTP API
 
@@ -382,6 +405,20 @@ Response:
 Errors return the same shape with `"status": "error"` and an `error` field: `400` for a
 missing `cmd`, `503` when C-Gate is not connected, `500` when the command itself fails or
 times out.
+
+**Tag database:**
+```
+GET /tag           → {"status":"ok","project":"HOME","ready":true}
+GET /tag/download  → the tag database as XML, as an attachment
+```
+
+`/tag` is what the console uses to label its download button. `/tag/download` returns
+`503` when C-Gate is not connected, `502` when C-Gate answers with an empty database (the
+project is not loaded), and `500` if the command fails or times out.
+
+```shell
+curl -OJ http://localhost:8980/tag/download
+```
 
 **Event stream (SSE):**
 ```

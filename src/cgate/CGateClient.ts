@@ -67,6 +67,11 @@ export class CGateClient extends EventEmitter {
     return this._ready;
   }
 
+  /** The C-Gate project this client is configured against. */
+  get project(): string {
+    return this.config.project;
+  }
+
   /**
    * Start (and keep) all three C-Gate connections.
    *

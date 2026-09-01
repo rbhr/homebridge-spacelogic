@@ -94,12 +94,27 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
     font-size: 13px;
   }
   #send:hover { background: #0098ff; }
+  #tagdl {
+    margin-left: auto;
+    background: #0e639c;
+    color: #fff;
+    border: none;
+    padding: 4px 12px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  #tagdl:hover { background: #1177bb; }
+  #tagdl:disabled { background: #3a3a3a; color: #777; cursor: default; }
 </style>
 </head>
 <body>
 <div id="header">
   <h1>SpaceLogic C-Gate Commander</h1>
   <span id="status">Connecting...</span>
+  <button id="tagdl" disabled title="Waiting for C-Gate">Download tag DB</button>
 </div>
 <div id="log"></div>
 <div id="input-bar">
@@ -179,6 +194,71 @@ export const CONSOLE_HTML = `<!DOCTYPE html>
   });
   send.addEventListener('click', sendCommand);
   cmd.focus();
+
+  // --- Tag database download ---
+  //
+  // DBGETXML over the command interface, which is all a C-Gate *client* can
+  // fetch: the .cbz the C-Gate add-on offers is a zip of the project directory,
+  // and those files are on the C-Gate host, not necessarily this one.
+  var tagdl = document.getElementById('tagdl');
+  var tagProject = '';
+
+  function setTagState(project, ready) {
+    tagProject = project || '';
+    tagdl.disabled = !ready || !tagProject;
+    tagdl.textContent = tagProject ? 'Download ' + tagProject + '.xml' : 'Download tag DB';
+    tagdl.title = tagdl.disabled
+      ? 'C-Gate is not connected, or no project is configured'
+      : 'Fetch the ' + tagProject + ' tag database over DBGETXML and save it as XML';
+  }
+
+  function refreshTagState() {
+    fetch('/tag')
+      .then(function(r) { return r.json(); })
+      .then(function(d) { setTagState(d.project, d.ready); })
+      .catch(function() { setTagState(tagProject, false); });
+  }
+
+  tagdl.addEventListener('click', function() {
+    var label = tagdl.textContent;
+    tagdl.disabled = true;
+    tagdl.textContent = 'Fetching...';
+    appendLine('DBGETXML //' + tagProject, 'cmd');
+
+    // Fetched rather than linked so a failure lands in the log as an error
+    // instead of replacing the console with a page of JSON.
+    fetch('/tag/download')
+      .then(function(r) {
+        if (!r.ok) {
+          return r.json().then(function(d) { throw new Error(d.error || ('HTTP ' + r.status)); });
+        }
+        return r.blob();
+      })
+      .then(function(blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = tagProject + '.xml';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        appendLine('Tag database saved as ' + tagProject + '.xml (' + blob.size + ' bytes)', 'response');
+      })
+      .catch(function(err) {
+        appendLine('Tag database download failed: ' + err.message, 'error');
+      })
+      .then(function() {
+        tagdl.textContent = label;
+        refreshTagState();
+      });
+  });
+
+  // The button's state follows the connection: SSE open means the commander is
+  // up, but C-Gate itself can still be away, so ask rather than assume.
+  refreshTagState();
+  es.addEventListener('open', refreshTagState);
+  setInterval(refreshTagState, 15000);
 
   appendLine('SpaceLogic C-Gate Commander ready', 'console');
 })();

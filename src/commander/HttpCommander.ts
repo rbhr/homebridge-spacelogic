@@ -4,9 +4,21 @@ import { URL } from 'node:url';
 import type { Logging } from 'homebridge';
 
 import type { CGateClient } from '../cgate/CGateClient.js';
+import { DBGETXML_TIMEOUT } from '../cgate/types.js';
 import { CONSOLE_HTML } from './console.html.js';
 
 const SSE_KEEPALIVE_INTERVAL = 30_000;
+
+/**
+ * A project name is config, not user input, but it ends up in a
+ * Content-Disposition header — where a quote or a newline would let it write
+ * headers of its own. Anything outside this set is dropped rather than
+ * escaped.
+ */
+function safeFileStem(project: string): string {
+  const cleaned = project.replace(/[^A-Za-z0-9_-]/g, '');
+  return cleaned || 'project';
+}
 
 export class HttpCommander {
   private server: Server | null = null;
@@ -113,6 +125,10 @@ export class HttpCommander {
       this.serveConsole(res);
     } else if (pathname === '/cgate') {
       await this.handleCommand(url, res);
+    } else if (pathname === '/tag') {
+      this.handleTagInfo(res);
+    } else if (pathname === '/tag/download') {
+      await this.handleTagDownload(res);
     } else if (pathname === '/events') {
       this.handleSSE(res);
     } else {
@@ -127,6 +143,68 @@ export class HttpCommander {
       'Cache-Control': 'no-cache',
     });
     res.end(CONSOLE_HTML);
+  }
+
+  /**
+   * What the console needs to label its download button before anyone clicks
+   * it: which project, and whether C-Gate can currently be asked for it.
+   */
+  private handleTagInfo(res: ServerResponse): void {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'ok',
+      project: this.cgateClient.project,
+      ready: this.cgateClient.ready,
+    }));
+  }
+
+  /**
+   * Download the project's tag database as XML.
+   *
+   * This is not the `.cbz` the C-Gate add-on's console produces, and it cannot
+   * be: that is a zip of the project *directory* — database plus the dynamic
+   * labelling bitmaps — and this plugin is a C-Gate client that may not even be
+   * on the same machine as those files. What a client can get is what C-Gate
+   * will hand over the command interface, which is `DBGETXML`: the whole tag
+   * database, and the counterpart of the `DBSETXML` that puts one back.
+   *
+   * It is the same document the plugin parses to discover groups, so it is also
+   * the file to attach to a bug report about discovery.
+   */
+  private async handleTagDownload(res: ServerResponse): Promise<void> {
+    const project = this.cgateClient.project;
+
+    if (!this.cgateClient.ready) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'error', error: 'C-Gate not connected' }));
+      return;
+    }
+
+    this.log.debug(`Commander tag database download: ${project}`);
+
+    try {
+      const xml = await this.cgateClient.sendCommand(`DBGETXML //${project}`, DBGETXML_TIMEOUT);
+      if (!xml) {
+        // C-Gate answered, but with nothing — an unloaded project rather than
+        // an unreachable server, so it is worth saying which.
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: 'error',
+          error: `DBGETXML returned no data for project ${project} — is it loaded?`,
+        }));
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/xml; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${safeFileStem(project)}.xml"`,
+      });
+      res.end(xml);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.debug(`Commander tag database download failed: ${message}`);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'error', error: message }));
+    }
   }
 
   private async handleCommand(url: URL, res: ServerResponse): Promise<void> {
